@@ -16,6 +16,8 @@
 #include "cluster/fwd.h"
 #include "coproc/event_listener.h"
 #include "coproc/pacemaker.h"
+#include "coproc/v8-init.h"
+#include "coproc/native-thread-pool.h"
 #include "pandaproxy/configuration.h"
 #include "pandaproxy/fwd.h"
 #include "raft/group_manager.h"
@@ -32,6 +34,7 @@
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/util/defer.hh>
+#include <memory>
 
 namespace po = boost::program_options; // NOLINT
 
@@ -116,6 +119,8 @@ private:
     ss::logger _log;
 
     std::unique_ptr<coproc::wasm::event_listener> _wasm_event_listener;
+    std::unique_ptr<v8::Platform> platform;
+    std::unique_ptr<coproc::ThreadPool> _threadpool;
     ss::sharded<rpc::connection_cache> _raft_connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
     ss::sharded<rpc::server> _rpc;

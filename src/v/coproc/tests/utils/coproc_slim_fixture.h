@@ -13,11 +13,13 @@
 #include "coproc/tests/utils/coproc_test_fixture.h"
 #include "model/metadata.h"
 #include "storage/api.h"
+#include "coproc/native-thread-pool.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/sharded.hh>
 
 #include <filesystem>
+#include <memory>
 #include <set>
 
 /// This fixture sets up the mininum viable framework neccessary to test the
@@ -71,4 +73,5 @@ private:
     ss::sharded<coproc::pacemaker> _pacemaker;
     ss::abort_source _abort_src;
     std::unique_ptr<coproc::wasm::script_dispatcher> _script_dispatcher;
+    std::unique_ptr<coproc::ThreadPool> _threadpool;
 };

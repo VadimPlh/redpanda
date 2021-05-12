@@ -49,11 +49,12 @@ rpc::backoff_policy wasm_transport_backoff() {
     return rpc::make_exponential_backoff_policy<rpc::clock_type>(1s, 10s);
 }
 
-pacemaker::pacemaker(unresolved_address addr, ss::sharded<storage::api>& api)
+pacemaker::pacemaker(unresolved_address addr, ss::sharded<storage::api>& api, ThreadPool& threadpool)
   : _shared_res(
     rpc::reconnect_transport(
       wasm_transport_cfg(addr), wasm_transport_backoff()),
-    api.local()) {
+    api.local()),
+    _threadpool(threadpool) {
     _offs.timer.set_callback([this] {
         (void)ss::with_gate(_gate, [this] {
             return save_offsets(_offs.snap, _ntps).then([this] {
@@ -122,8 +123,11 @@ std::vector<errc> pacemaker::add_source(
         /// Reasons are returned in the 'acks' structure
         return acks;
     }
+
+    v8::Isolate::CreateParams create_params;
+    create_params.array_buffer_allocator_shared = std::shared_ptr<v8::ArrayBuffer::Allocator>(v8::ArrayBuffer::Allocator::NewDefaultAllocator());
     auto script_ctx = std::make_unique<script_context>(
-      id, _shared_res, std::move(ctxs));
+      id, _shared_res, std::move(ctxs), std::move(create_params), _threadpool);
     const auto [_, success] = _scripts.emplace(id, std::move(script_ctx));
     vassert(success, "Double coproc insert detected");
     vlog(coproclog.debug, "Adding source with id: {}", id);

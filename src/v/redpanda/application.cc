@@ -23,7 +23,6 @@
 #include "config/configuration.h"
 #include "config/endpoint_tls_config.h"
 #include "config/seed_server.h"
-#include "coproc/v8-init.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
 #include "kafka/server/group_manager.h"
@@ -50,6 +49,7 @@
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
+#include <seastar/core/reactor.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/json/json_elements.hh>
@@ -358,15 +358,15 @@ void application::wire_up_redpanda_services() {
 
     if (coproc_enabled()) {
         syschecks::systemd_message("Building coproc pacemaker").get();
+        platform = coproc::init_v8_platform();
+        _threadpool = std::make_unique<coproc::ThreadPool>(1, seastar::smp::count, 1);
         construct_service(
           pacemaker,
           config::shard_local_cfg().coproc_supervisor_server(),
-          std::ref(storage))
+          std::ref(storage),
+          std::ref(*_threadpool))
           .get();
     }
-
-    auto t = coproc::init_v8_platform();
-    coproc::stop_v8_platform();
 
     syschecks::systemd_message("Intializing raft group manager").get();
     construct_service(

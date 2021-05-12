@@ -41,7 +41,7 @@ public:
      * @param address of coprocessor engine
      * @param reference to the storage layer
      */
-    pacemaker(unresolved_address, ss::sharded<storage::api>&);
+    pacemaker(unresolved_address, ss::sharded<storage::api>&, ThreadPool&);
 
     /**
      * Begins the offset tracking fiber
@@ -134,6 +134,8 @@ private:
 
     /// Main datastructure containing all active script_contexts
     absl::node_hash_map<script_id, std::unique_ptr<script_context>> _scripts;
+
+    ThreadPool& _threadpool;
 
     /// Referencable cache of active ntps
     ntp_context_cache _ntps;

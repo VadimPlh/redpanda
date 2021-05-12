@@ -18,6 +18,7 @@
 
 coproc_slim_fixture::coproc_slim_fixture() {
     std::filesystem::create_directory(_data_dir);
+    _threadpool = std::make_unique<coproc::ThreadPool>(1, seastar::smp::count, 1);
 }
 
 coproc_slim_fixture::~coproc_slim_fixture() {
@@ -58,7 +59,7 @@ ss::future<> coproc_slim_fixture::start() {
       .then([this] { return _storage.invoke_on_all(&storage::api::start); })
       .then([this] {
           return _pacemaker.start(
-            unresolved_address("127.0.0.1", 43189), std::ref(_storage));
+            unresolved_address("127.0.0.1", 43189), std::ref(_storage), std::ref(*_threadpool));
       })
       .then(
         [this] { return _pacemaker.invoke_on_all(&coproc::pacemaker::start); })

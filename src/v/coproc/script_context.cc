@@ -11,6 +11,7 @@
 
 #include "coproc/script_context.h"
 
+#include "bytes/iobuf.h"
 #include "coproc/logger.h"
 #include "coproc/reference_window_consumer.hpp"
 #include "coproc/types.h"
@@ -22,6 +23,7 @@
 #include "storage/types.h"
 #include "vlog.h"
 
+#include <seastar/core/future.hh>
 #include <seastar/core/sleep.hh>
 
 #include <chrono>
@@ -59,10 +61,14 @@ extract_batch_info(model::record_batch_reader::data_t data) {
 script_context::script_context(
   script_id id,
   shared_script_resources& resources,
-  ntp_context_cache&& contexts)
+  ntp_context_cache&& contexts,
+  v8::Isolate::CreateParams&& create_params,
+  ThreadPool& threadpool)
   : _resources(resources)
   , _ntp_ctxs(std::move(contexts))
-  , _id(id) {
+  , _id(id)
+  , _instance(std::move(create_params))
+  , _threadpool(threadpool) {
     vassert(
       !_ntp_ctxs.empty(),
       "Unallowed to create an instance of script_context without having a "
