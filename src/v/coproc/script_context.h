@@ -133,5 +133,10 @@ private:
 
     v8_instance _instance;
     [[maybe_unused]] ThreadPool& _threadpool;
+
+    std::chrono::steady_clock::time_point _start;
+    std::chrono::steady_clock::time_point _end;
+
+    double _min_time{std::numeric_limits<double>::max()};
 };
 } // namespace coproc
