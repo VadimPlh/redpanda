@@ -161,6 +161,14 @@ script_dispatcher::add_sources(
     });
 }
 
+ss::future<std::vector<bool>>
+script_dispatcher::add_source_for_v8(
+  script_id id) {
+    return _pacemaker.map([id](pacemaker& p) {
+        return p.add_source_for_v8(id, "/home/vadim/simple.js");
+    });
+}
+
 ss::future<result<std::vector<script_id>>>
 script_dispatcher::enable_coprocessors(enable_copros_request req) {
     auto client = co_await get_client();

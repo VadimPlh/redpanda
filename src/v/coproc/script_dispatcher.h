@@ -57,6 +57,7 @@ private:
     /// using .map/invoke_on_all within the context of a coroutine
     ss::future<std::vector<std::vector<coproc::errc>>>
       add_sources(script_id, std::vector<topic_namespace_policy>);
+    ss::future<std::vector<bool>> add_source_for_v8(script_id);
     ss::future<std::vector<coproc::errc>> remove_sources(script_id);
     ss::future<> remove_all_sources();
     ss::future<bool> script_exists(script_id);

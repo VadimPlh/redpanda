@@ -15,6 +15,7 @@
 #include "coproc/logger.h"
 #include "coproc/reference_window_consumer.hpp"
 #include "coproc/types.h"
+#include "coproc/v8-instance.h"
 #include "likely.h"
 #include "model/record_batch_reader.h"
 #include "model/timeout_clock.h"
@@ -23,8 +24,11 @@
 #include "storage/types.h"
 #include "vlog.h"
 
+#include <seastar/core/do_with.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/loop.hh>
 #include <seastar/core/sleep.hh>
+#include <seastar/util/later.hh>
 
 #include <chrono>
 #include <exception>
@@ -94,6 +98,10 @@ ss::future<> script_context::start() {
     });
 }
 
+ss::future<bool> script_context::add_source_for_v8(std::string path) {
+  return _instance.init_instance(path);
+}
+
 ss::future<> script_context::do_execute() {
     /// This loop executes while there is data to read from the input logs and
     /// while there is a current successful connection to the wasm engine.
@@ -136,9 +144,193 @@ ss::future<> script_context::shutdown() {
     return _gate.close().then([this] { _ntp_ctxs.clear(); });
 }
 
+class consumer {
+public:
+    explicit consumer(size_t depth, v8_instance& v8_engine, ThreadPool& threadpool)
+      : _depth(depth),
+        _engine(v8_engine),
+        _threadpool(threadpool) {}
+
+    ss::future<ss::stop_iteration> operator()(model::record_batch& b) {
+        return model::for_each_record(b, [this](const model::record& r){
+          data.clear();
+          data.resize(r.value_size());
+          int idx = 0;
+          for (auto& it : r.value()) {
+            std::copy(it.get(), it.get() + it.size(), data.begin() + idx);
+            idx += it.size();
+          }
+        })
+        .then([this](){
+          return _engine.run_instance(_threadpool, 1, data);
+        })
+        .then([this, &b](auto res){
+          std::cout << res << std::string(data.data(), data.size()) << std::endl;
+          return model::for_each_record(b, [this](const model::record& r){
+            model::record& new_ref = const_cast<model::record&>(r);
+            new_ref.release_value();
+            iobuf& ref_value = const_cast<iobuf&>(new_ref.value());
+            ref_value.append(data.data(), data.size());
+            std::cout << ref_value.size_bytes() << std::endl;
+          });
+        })
+        .then([this](){
+          if (--_depth == 0) {
+            return ss::make_ready_future<ss::stop_iteration>(
+              ss::stop_iteration::yes);
+          }
+          return ss::make_ready_future<ss::stop_iteration>(
+            ss::stop_iteration::no);
+          });
+    }
+
+    ss::future<> end_of_stream() {
+        return ss::now();
+    }
+
+private:
+
+    size_t _depth;
+    v8_instance& _engine;
+    ThreadPool& _threadpool;
+
+    std::vector<char> data;
+};
+
+namespace {
+
+ss::future<model::record_batch_reader::data_t>
+copy_batch(const model::record_batch_reader::data_t& data) {
+    return ss::map_reduce(
+      data.cbegin(),
+      data.cend(),
+      [](const model::record_batch& rb) {
+          return ss::make_ready_future<model::record_batch>(rb.copy());
+      },
+      model::record_batch_reader::data_t(),
+      reduce::push_back());
+}
+
+ss::future<std::vector<process_batch_reply::data>> resultmap_to_vector(
+  script_id id, const model::ntp& ntp, script_context::result_map rmap) {
+    return ss::do_with(std::move(rmap), [id, ntp](script_context::result_map& rmap) {
+      return ssx::async_transform(
+        rmap, [id, ntp](script_context::result_map::value_type& vt) {
+            return process_batch_reply::data{
+              .id = id,
+              .ntp = model::ntp(
+                ntp.ns,
+                to_materialized_topic(ntp.tp.topic, vt.first),
+                ntp.tp.partition),
+              .reader = model::make_memory_record_batch_reader(
+                std::move(vt.second))};
+        });
+  });
+}
+
+}
+
+ss::future<std::vector<process_batch_reply::data>>
+script_context::invoke_coprocessor(
+  const model::ntp& ntp,
+  const script_id id,
+  ss::circular_buffer<model::record_batch>&& batches) {
+    return ss::do_with(std::move(batches), ss::circular_buffer<model::record_batch>(), [this, ntp, id](auto& input_batch, auto &result_batch){
+      return ss::do_for_each(input_batch, [this, &result_batch](model::record_batch& batch){
+        return ss::make_ready_future<model::record_batch>(batch.copy())
+        .then([this, &result_batch](model::record_batch new_batch){
+          return ss::do_with(std::move(new_batch), std::vector<model::record>(), [this, &result_batch](model::record_batch& new_batch, auto& vector_records){
+            return model::for_each_record(new_batch, [this, &vector_records](model::record& r){
+              iobuf old_value = r.release_value();
+              auto stream = make_iobuf_input_stream(std::move(old_value));
+              return stream.read()
+              .then([this, &vector_records, &r](ss::temporary_buffer<char> buf){
+                return ss::do_with(std::move(buf), [this, &vector_records, &r](ss::temporary_buffer<char>& tmp_buf){
+                  std::span data(const_cast<char*>(tmp_buf.get()), tmp_buf.size());
+                  return this->_instance.run_instance(this->_threadpool, 1, data)
+                  .then([&tmp_buf, &vector_records, &r](auto res){
+                    std::cout << res << std::string(tmp_buf.get(), tmp_buf.size()) << std::endl;
+                    iobuf new_value;
+                    new_value.append(std::move(tmp_buf));
+                    const_cast<iobuf&>(r.value()) = std::move(new_value);
+                    vector_records.emplace_back(std::move(r));
+                    return ss::now();
+                  });
+                });
+              });
+            })
+            .then([&new_batch, &result_batch, &vector_records](){
+                model::record_batch result(new_batch.header(), std::move(vector_records));
+                result.header().crc = model::crc_record_batch(result);
+                result.header().header_crc = model::internal_header_only_crc(result.header());
+                result_batch.emplace_back(std::move(result));
+                return ss::now();
+            });
+          });
+        });
+      })
+      .then([ntp, id, &result_batch](){
+        script_context::result_map r;
+        r.emplace(model::topic("result") , std::move(result_batch));
+        return resultmap_to_vector(id, ntp, std::move(r));
+      });
+    });
+}
+
+ss::future<std::vector<process_batch_reply::data>> script_context::process_data(process_batch_request::data d) {
+  return model::consume_reader_to_memory(std::move(d.reader), model::no_timeout)
+  .then([this, ids = std::move(d.ids), ntp = std::move(d.ntp)](model::record_batch_reader::data_t rbr) mutable {
+    return ss::do_with(std::move(rbr), std::move(ids), [this, ntp = std::move(ntp)](const model::record_batch_reader::data_t& rbr, const std::vector<script_id>& ids) {
+      return copy_batch(rbr)
+      .then([this, &ids, ntp = ntp](model::record_batch_reader::data_t batch) {
+        return invoke_coprocessor(ntp, ids[0], std::move(batch));
+      });
+    });
+  });
+}
+
+ss::future<process_batch_reply> script_context::invoke_v8(process_batch_request& r) {
+  return ssx::async_flat_transform(
+          r.reqs,
+          [this](process_batch_request::data& d) {
+              return process_data(std::move(d));
+          })
+  .then([](std::vector<process_batch_reply::data> replies) {
+      return process_batch_reply{.resps = std::move(replies)};
+  });
+}
+
 ss::future<> script_context::send_request(
-  supervisor_client_protocol client, process_batch_request r) {
+  [[maybe_unused]] supervisor_client_protocol client, process_batch_request r) {
+    return ss::do_with(std::move(r), [this](process_batch_request& r){
+      return invoke_v8(r)
+      .then([this](process_batch_reply repl){
+        return process_reply(std::move(repl));
+      });
+    });
+/*
+      return r.reqs[0].reader.for_each_ref(consumer(r.reqs.size(), _instance, _threadpool), model::no_timeout)
+      .then([this, &r](){
+        process_batch_reply repl;
+        for (auto& it : r.reqs) {
+          auto new_ntp = model::ntp(
+                  it.ntp.ns,
+                  to_materialized_topic(it.ntp.tp.topic, model::topic("result")),
+                  it.ntp.tp.partition);
+
+          for (auto it : it.ids) {
+            std::cout << it << std::endl;
+          }
+          process_batch_reply::data new_data = {.id = _id, .ntp = new_ntp, .reader = std::move(it.reader)};
+
+          repl.resps.push_back(std::move(new_data));
+        }
+        return process_reply(std::move(repl));
+      });
+    });
+
     using reply_t = result<rpc::client_context<process_batch_reply>>;
+    std::cout << r.reqs[0].ntp << std::endl;
     return client
       .process_batch(
         std::move(r), rpc::client_opts(rpc::clock_type::now() + 5s))
@@ -151,7 +343,7 @@ ss::future<> script_context::send_request(
             "Error upon attempting to perform RPC to wasm engine, code: {}",
             reply.error());
           return ss::now();
-      });
+      });*/
 }
 
 ss::future<std::vector<process_batch_request::data>> script_context::read() {

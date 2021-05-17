@@ -16,6 +16,7 @@
 #include "coproc/offset_storage_utils.h"
 #include "coproc/script_context.h"
 #include "coproc/types.h"
+#include "coproc/v8-instance.h"
 #include "rpc/reconnect_transport.h"
 #include "storage/fwd.h"
 #include "storage/snapshot.h"
@@ -100,7 +101,13 @@ public:
     /// returns a handle to the reconnect transport
     shared_script_resources& resources() { return _shared_res; }
 
+    ss::future<bool> add_source_for_v8(script_id, std::string);
+
+    ss::future<bool> add_v8_engine(script_id, std::string);
+
 private:
+    seastar::future<bool> create_instance(script_id, std::string);
+
     void do_add_source(
       script_id,
       ntp_context_cache&,
@@ -134,6 +141,8 @@ private:
 
     /// Main datastructure containing all active script_contexts
     absl::node_hash_map<script_id, std::unique_ptr<script_context>> _scripts;
+
+    std::map<script_id, v8_instance> _v8_instances;
 
     ThreadPool& _threadpool;
 

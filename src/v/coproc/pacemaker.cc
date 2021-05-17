@@ -23,6 +23,7 @@
 #include "storage/directories.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/reactor.hh>
 
@@ -136,22 +137,26 @@ std::vector<errc> pacemaker::add_source(
         if (found == _scripts.end()) {
             return ss::now();
         }
-        return found->second->start().handle_exception_type(
-          [this, id](const script_failed_exception& e) {
-              /// A script must be deregistered due to an internal script error.
-              /// The wasm engine determines the case, most likley the apply()
-              /// method has thrown or there is a syntax error within the script
-              /// itself.
-              vlog(coproclog.info, "Handling script_failed_exception: {}", e);
-              vassert(
-                id == e.get_id(),
-                "script_failed_handler id mismatch detected, observed: {} "
-                "expected: {}",
-                e.get_id(),
-                id);
-              return container().invoke_on_all([id](pacemaker& p) {
-                  return p.remove_source(id).discard_result();
-              });
+        return found->second->add_source_for_v8("/home/vadim/simple.js")
+        .then([this, id, found = std::move(found)](bool res){
+            std::cout << res << std::endl;
+            return found->second->start().handle_exception_type(
+            [this, id](const script_failed_exception& e) {
+                /// A script must be deregistered due to an internal script error.
+                /// The wasm engine determines the case, most likley the apply()
+                /// method has thrown or there is a syntax error within the script
+                /// itself.
+                vlog(coproclog.info, "Handling script_failed_exception: {}", e);
+                vassert(
+                    id == e.get_id(),
+                    "script_failed_handler id mismatch detected, observed: {} "
+                    "expected: {}",
+                    e.get_id(),
+                    id);
+                return container().invoke_on_all([id](pacemaker& p) {
+                    return p.remove_source(id).discard_result();
+                });
+            });
           });
     });
     return acks;
@@ -247,5 +252,33 @@ bool pacemaker::ntp_is_registered(const model::ntp& ntp) {
     auto found = _ntps.find(ntp);
     return found != _ntps.end() && found->second;
 }
+
+ss::future<bool> pacemaker::add_source_for_v8(script_id id, std::string path) {
+    auto found = _scripts.find(id);
+    if (found == _scripts.end()) {
+        return ss::make_ready_future<bool>(false);
+    }
+
+    return found->second->add_source_for_v8(path);
+}
+
+ss::future<bool> pacemaker::add_v8_engine(script_id id, std::string path) {
+    auto engine_it = _v8_instances.find(id);
+        if (engine_it != _v8_instances.end()) {
+            std::cout << "Script " << path << "already exists" << std::endl; //TODO: use log system from seastar
+            return seastar::make_ready_future<bool>(false);
+        }
+
+    return create_instance(id, path);
+}
+
+seastar::future<bool> pacemaker::create_instance(script_id instance_name, std::string script_path) {
+    v8::Isolate::CreateParams create_params;
+    create_params.array_buffer_allocator_shared = std::shared_ptr<v8::ArrayBuffer::Allocator>(v8::ArrayBuffer::Allocator::NewDefaultAllocator());
+
+    auto it = _v8_instances.emplace(instance_name, std::move(create_params));
+    return it.first->second.init_instance(script_path);
+}
+
 
 } // namespace coproc

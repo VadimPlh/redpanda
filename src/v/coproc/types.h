@@ -106,11 +106,13 @@ struct process_batch_request {
 /// \brief Response from the above request, acks from script ids that have
 /// processed the record and produce new batches on a new materialized ntp
 struct process_batch_reply {
+
     struct data {
         script_id id;
         model::ntp ntp;
         std::optional<model::record_batch_reader> reader;
     };
+
     std::vector<data> resps;
 };
 

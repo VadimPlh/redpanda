@@ -360,6 +360,7 @@ void application::wire_up_redpanda_services() {
         syschecks::systemd_message("Building coproc pacemaker").get();
         platform = coproc::init_v8_platform();
         _threadpool = std::make_unique<coproc::ThreadPool>(1, seastar::smp::count, 1);
+        _threadpool->start().get();
         construct_service(
           pacemaker,
           config::shard_local_cfg().coproc_supervisor_server(),

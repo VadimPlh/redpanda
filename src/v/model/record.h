@@ -323,7 +323,7 @@ public:
     record_batch_attributes& operator|=(model::compression c) {
         // clang-format off
         _attributes |=
-        static_cast<std::underlying_type_t<model::compression>>(c) 
+        static_cast<std::underlying_type_t<model::compression>>(c)
             & record_batch_attributes::compression_mask;
         // clang-format on
         return *this;

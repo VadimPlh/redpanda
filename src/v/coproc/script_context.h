@@ -14,6 +14,7 @@
 #include "coproc/ntp_context.h"
 #include "coproc/supervisor.h"
 #include "coproc/types.h"
+#include "model/record_utils.h"
 #include "random/simple_time_jitter.h"
 #include "utils/mutex.h"
 
@@ -48,6 +49,9 @@ public:
      * @param ctx Shared state, shared across all script_contexts on a shard
      * @param ntp_ctxs Map of interested ntps, strongly retained by 'this'
      **/
+
+    using result_map = absl::flat_hash_map<model::topic, ss::circular_buffer<model::record_batch>>;
+
     explicit script_context(
       script_id, shared_script_resources&, ntp_context_cache&&, v8::Isolate::CreateParams&&, ThreadPool&);
 
@@ -70,6 +74,18 @@ public:
      * held by this context are relinquished
      */
     ss::future<> shutdown();
+
+    ss::future<bool> add_source_for_v8(std::string);
+
+    ss::future<process_batch_reply> invoke_v8(process_batch_request&);
+
+    ss::future<std::vector<process_batch_reply::data>> process_data(process_batch_request::data);
+
+    ss::future<std::vector<process_batch_reply::data>>
+    invoke_coprocessor(
+      const model::ntp&,
+      const script_id,
+      ss::circular_buffer<model::record_batch>&&);
 
 private:
     enum class write_response { success, crc_failure, term_too_old };
