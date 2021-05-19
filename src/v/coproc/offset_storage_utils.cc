@@ -146,6 +146,11 @@ ss::future<> save_offsets(
       "Saving {} coprocessor offsets to disk....",
       ntp_cache.size());
     /// Create the metadata, and data iobuffers
+    for (auto& it : ntp_cache) {
+      for (auto it2 : it.second->offsets) {
+        std::cout << it2.first << " " << it2.second.last_acked << std::endl;
+      }
+    }
     iobuf metadata = reflection::to_iobuf(static_cast<int8_t>(1));
     iobuf data = co_await serialize_data_field(ntp_cache);
 

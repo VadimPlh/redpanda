@@ -46,6 +46,9 @@ redpanda:
   # not recomended for production use
   developer_mode: true
   enable_coproc: true
+  coproc_offset_flush_interval_ms: 10000
+  coproc_max_ingest_bytes: 6000
+  coproc_max_batch_size: 5000
 # Enable Pandaproxy
 pandaproxy:
 

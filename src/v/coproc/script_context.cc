@@ -255,7 +255,6 @@ ss::future<> script_context::send_request(
 
 /*
     using reply_t = result<rpc::client_context<process_batch_reply>>;
-    std::cout << r.reqs[0].ntp << std::endl;
     _start = std::chrono::high_resolution_clock::now();
     return client
       .process_batch(
