@@ -20,7 +20,7 @@
 
 #include <cstdint>
 
-v8_engine::enviroment env;
+v8_engine::v8_platform_wrapper env;
 
 SEASTAR_THREAD_TEST_CASE(to_upper_test) {
     v8_engine::script inst(100);

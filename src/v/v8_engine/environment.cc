@@ -14,7 +14,7 @@
 
 namespace v8_engine {
 
-enviroment::enviroment() {
+v8_platform_wrapper::v8_platform_wrapper() {
     v8::V8::SetFlagsFromString("--single-threaded");
     _platform = v8::platform::NewSingleThreadedDefaultPlatform();
     vassert(_platform.get() != nullptr, "Can not init platform for v8");
@@ -22,9 +22,20 @@ enviroment::enviroment() {
     v8::V8::Initialize();
 }
 
-enviroment::~enviroment() {
+v8_platform_wrapper::~v8_platform_wrapper() {
     v8::V8::Dispose();
     v8::V8::ShutdownPlatform();
 }
+
+enviroment::enviroment(size_t threads_num, uint8_t cpu_id)
+  : _executor(threads_num, cpu_id) {}
+
+enviroment::~enviroment() {
+    vassert(_executor.is_stopping(), "Executor was not stopped");
+}
+
+ss::future<> enviroment::start() { return _executor.start(); }
+
+ss::future<> enviroment::stop() { return _executor.stop(); }
 
 } // namespace v8_engine
