@@ -7,6 +7,8 @@ rp_test(
   LIBRARIES v::seastar_testing_main Boost::unit_test_framework v::v8_engine v::utils
   INPUT_FILES ${CMAKE_CURRENT_SOURCE_DIR}/scripts/sum.js
               ${CMAKE_CURRENT_SOURCE_DIR}/scripts/to_upper.js
+              ${CMAKE_CURRENT_SOURCE_DIR}/scripts/compile_timeout.js
+              ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_timeout.js
   ARGS "-- -c 1"
   LABELS v8_engine
 )

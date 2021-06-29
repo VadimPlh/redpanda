@@ -13,15 +13,24 @@
 #include "utils/file_io.h"
 
 #include <seastar/core/future.hh>
+#include <seastar/core/lowres_clock.hh>
+#include <seastar/core/semaphore.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/util/later.hh>
 
+#include <chrono>
 #include <string_view>
 #include <utility>
 
 namespace v8_engine {
 
-script::script(size_t max_heap_size_in_bytes) {
+script::script(
+  size_t max_heap_size_in_bytes,
+  executor& executor_for_script,
+  size_t timeout_ms)
+  : _executor(executor_for_script)
+  , _timeout_ms(timeout_ms) {
     v8::Isolate::CreateParams isolate_params;
     isolate_params.array_buffer_allocator_shared
       = std::shared_ptr<v8::ArrayBuffer::Allocator>(
@@ -30,6 +39,8 @@ script::script(size_t max_heap_size_in_bytes) {
       0, max_heap_size_in_bytes);
     _isolate = std::unique_ptr<v8::Isolate, isolate_deleter>(
       v8::Isolate::New(isolate_params), isolate_deleter());
+
+    _watchdog.set_callback([this] { stop_execution(); });
 }
 
 script::~script() {
@@ -37,9 +48,37 @@ script::~script() {
     _context.Reset();
 }
 
-void script::init(std::string_view name, ss::temporary_buffer<char> js_code) {
-    compile_script(std::move(js_code));
-    set_function(name);
+ss::future<>
+script::init(ss::sstring name, ss::temporary_buffer<char> js_code) {
+    return ss::with_semaphore(
+      _mutex,
+      1,
+      [this, js_code = std::move(js_code), name = std::move(name)]() mutable {
+          return _executor
+            .submit(
+              [this] {
+                  _is_cancel = false;
+                  _watchdog.rearm(seastar::lowres_clock::time_point(
+                    seastar::lowres_clock::now() + _first_run_timeout_sec));
+              },
+              [this, js_code = std::move(js_code)]() mutable {
+                  compile_script(std::move(js_code));
+              })
+            .handle_exception_type([this](const ss::sleep_aborted&) {
+                throw_exception_from_v8("Executor is closed");
+            })
+            .handle_exception_type([this](const ss::gate_closed_exception&) {
+                throw_exception_from_v8("Executor is closed");
+            })
+            .finally([this] {
+                if (!_is_cancel) {
+                    _watchdog.cancel();
+                } else {
+                    continue_execution();
+                }
+            })
+            .then([this, name] { set_function(name); });
+      });
 }
 
 void script::compile_script(ss::temporary_buffer<char> js_code) {
@@ -66,7 +105,13 @@ void script::compile_script(ss::temporary_buffer<char> js_code) {
     // Need to be running in executor.
     v8::Local<v8::Value> result;
     if (!compiled_script->Run(local_ctx).ToLocal(&result)) {
-        throw_exception_from_v8(try_catch, "Can not run script in first time");
+        if (try_catch.Exception()->IsNull() && try_catch.Message().IsEmpty()) {
+            throw_exception_from_v8(
+              "Can not run script in first time(timeout)");
+        } else {
+            throw_exception_from_v8(
+              try_catch, "Can not run script in first time");
+        }
     }
 
     _context.Reset(_isolate.get(), local_ctx);
@@ -92,9 +137,31 @@ void script::set_function(std::string_view name) {
     _function.Reset(_isolate.get(), function_val.As<v8::Function>());
 }
 
-// It is the first version for run. In next updates I use alient_thread for run
-// v8.
-void script::run(ss::temporary_buffer<char>& data) { run_internal(data); }
+ss::future<> script::run(ss::temporary_buffer<char>& data) {
+    return ss::with_semaphore(_mutex, 1, [this, &data] {
+        return _executor
+          .submit(
+            [this] {
+                _is_cancel = false;
+                _watchdog.rearm(seastar::lowres_clock::time_point(
+                  seastar::lowres_clock::now() + _timeout_ms));
+            },
+            [this, &data] { run_internal(data); })
+          .handle_exception_type([this](const ss::sleep_aborted&) {
+              throw_exception_from_v8("Executor is closed");
+          })
+          .handle_exception_type([this](const ss::gate_closed_exception&) {
+              throw_exception_from_v8("Executor is closed");
+          })
+          .finally([this] {
+              if (!_is_cancel) {
+                  _watchdog.cancel();
+              } else {
+                  continue_execution();
+              }
+          });
+    });
+}
 
 void script::run_internal(ss::temporary_buffer<char>& data) {
     v8::Locker locker(_isolate.get());
@@ -117,8 +184,17 @@ void script::run_internal(ss::temporary_buffer<char>& data) {
       _isolate.get(), _function);
     if (!local_function->Call(local_ctx, local_ctx->Global(), argc, argv)
            .ToLocal(&result)) {
-        throw_exception_from_v8(try_catch, "Can not run function");
+        // StopExecution generate exception without message
+        if (try_catch.Exception()->IsNull() && try_catch.Message().IsEmpty()) {
+            throw_exception_from_v8("Sript timeout");
+        } else {
+            throw_exception_from_v8(try_catch, "Can not run function");
+        }
     }
+}
+
+void script::throw_exception_from_v8(std::string_view msg) {
+    throw script_exception(fmt::format("{}", msg));
 }
 
 void script::throw_exception_from_v8(
@@ -126,6 +202,19 @@ void script::throw_exception_from_v8(
     v8::String::Utf8Value error(_isolate.get(), try_catch.Exception());
     throw script_exception(
       fmt::format("{}:{}", msg, std::string(*error, error.length())));
+}
+
+void script::stop_execution() {
+    if (!_isolate->IsExecutionTerminating()) {
+        _is_cancel = true;
+        _isolate->TerminateExecution();
+    }
+}
+
+void script::continue_execution() {
+    if (_isolate->IsExecutionTerminating()) {
+        _isolate->CancelTerminateExecution();
+    }
 }
 
 } // namespace v8_engine

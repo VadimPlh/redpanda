@@ -11,11 +11,14 @@
 #pragma once
 
 #include "seastarx.h"
+#include "v8_engine/executor.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/temporary_buffer.hh>
+#include <seastar/core/timer.hh>
 
+#include <chrono>
 #include <v8.h>
 
 namespace v8_engine {
@@ -40,12 +43,15 @@ class script {
 public:
     // Init new instance.
     // Create isolate and configure constraints for it.
-    explicit script(size_t max_heap_size_in_bytes);
+    script(
+      size_t max_heap_size_in_bytes,
+      executor& executor_for_script,
+      size_t _timeout_ms = 10);
 
     script(const script& other) = delete;
     script& operator=(const script& other) = delete;
-    script(script&& other) = default;
-    script& operator=(script&& other) = default;
+    script(script&& other) = delete;
+    script& operator=(script&& other) = delete;
 
     // Destroy instance. Be carefull!
     // First of all run Reset for all v8::Global fileds
@@ -56,8 +62,9 @@ public:
     ///
     /// \param function name for runnig in future
     /// \param buffer with js code for compile
-    void init(std::string_view name, ss::temporary_buffer<char> js_code);
-    void run(ss::temporary_buffer<char>& data);
+    ss::future<> init(ss::sstring name, ss::temporary_buffer<char> js_code);
+
+    ss::future<> run(ss::temporary_buffer<char>& data);
 
 private:
     // Must be running in executor, because it runs js code
@@ -76,6 +83,7 @@ private:
     void run_internal(ss::temporary_buffer<char>& data);
 
     // Throw c++ exception from v8::TryCatch
+    void throw_exception_from_v8(std::string_view msg);
     void throw_exception_from_v8(
       const v8::TryCatch& try_catch, std::string_view msg);
 
@@ -84,10 +92,29 @@ private:
         void operator()(v8::Isolate* isolate) const { isolate->Dispose(); }
     };
 
+    // Stop v8 execution if it takes too much time
+    void stop_execution();
+    // Cancel stop execution for reusing isolate
+    void continue_execution();
+
     std::unique_ptr<v8::Isolate, isolate_deleter> _isolate;
 
     v8::Global<v8::Context> _context;
     v8::Global<v8::Function> _function;
+
+    executor& _executor; // TODO: maybe use unique_pointer without destructor
+                         // for move v8_script in container with scripts
+
+    // Watchdog for script timelimit
+    seastar::timer<seastar::lowres_clock> _watchdog;
+    // Mutex for lock watchdog for each sctipt run
+    ss::semaphore _mutex{1};
+    bool _is_cancel{false};
+
+    // Script timeout
+    std::chrono::milliseconds _timeout_ms;
+    // Timeout for run script in first time for initialization
+    static constexpr std::chrono::seconds _first_run_timeout_sec{10};
 };
 
 } // namespace v8_engine
