@@ -49,6 +49,7 @@
 #include "test_utils/logs.h"
 #include "utils/file_io.h"
 #include "utils/human.h"
+#include "v8_engine/environment.h"
 #include "version.h"
 #include "vlog.h"
 
@@ -968,6 +969,12 @@ void application::start_redpanda() {
         construct_single_service(_wasm_event_listener, std::ref(pacemaker));
         _wasm_event_listener->start().get();
         pacemaker.invoke_on_all(&coproc::pacemaker::start).get();
+    }
+    if (v8_engine_enabled()) {
+        const auto& cfg = config::shard_local_cfg();
+        _v8_env.emplace();
+        construct_single_service(_v8_executor, cfg.core_for_executor, cfg.max_executor_queue_size);
+
     }
     if (config::shard_local_cfg().enable_admin_api()) {
         _admin.invoke_on_all(&admin_server::start).get0();
