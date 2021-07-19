@@ -60,11 +60,6 @@ public:
 
     void broken() noexcept { _sem.broken(); }
 
-    template<typename Exception>
-    void broken(const Exception& ex) noexcept {
-        _sem.broken(std::make_exception_ptr(ex));
-    }
-
 private:
     ss::semaphore _sem;
 };

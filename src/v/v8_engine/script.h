@@ -11,15 +11,11 @@
 #pragma once
 
 #include "seastarx.h"
-#include "v8_engine/environment.h"
 
 #include <seastar/core/future.hh>
-#include <seastar/core/gate.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/temporary_buffer.hh>
-#include <seastar/core/timer.hh>
 
-#include <chrono>
 #include <v8.h>
 
 namespace v8_engine {
@@ -44,12 +40,12 @@ class script {
 public:
     // Init new instance.
     // Create isolate and configure constraints for it.
-    script(size_t max_heap_size_in_bytes, size_t _timeout_ms);
+    explicit script(size_t max_heap_size_in_bytes);
 
     script(const script& other) = delete;
     script& operator=(const script& other) = delete;
-    script(script&& other) = delete;
-    script& operator=(script&& other) = delete;
+    script(script&& other) = default;
+    script& operator=(script&& other) = default;
 
     // Destroy instance. Be carefull!
     // First of all run Reset for all v8::Global fileds
@@ -60,37 +56,8 @@ public:
     ///
     /// \param function name for runnig in future
     /// \param buffer with js code for compile
-    /// \param executor for compile script
-    template<typename Executor>
-    ss::future<> init(
-      ss::sstring name,
-      ss::temporary_buffer<char> js_code,
-      Executor& executor) {
-        task_for_executor executor_task(
-          *this, std::move(js_code), task_for_executor::task_type::compile);
-        return executor
-          .submit(
-            std::forward<task_for_executor>(executor_task),
-            _first_run_timeout_ms)
-          .handle_exception_type([this](const ss::gate_closed_exception&) {
-              throw_exception_from_v8("Executor is closed");
-          })
-          .then([this, name] { set_function(name); });
-    }
-
-    /// Run function from js script.
-    ///
-    /// \param data for js script
-    /// \param executor for run script
-    template<typename Executor>
-    ss::future<> run(ss::temporary_buffer<char> data, Executor& executor) {
-        task_for_executor executor_task(
-          *this, std::move(data), task_for_executor::task_type::run);
-        return executor.submit(std::move(executor_task), _timeout_ms)
-          .handle_exception_type([this](const ss::gate_closed_exception&) {
-              throw_exception_from_v8("Executor is closed");
-          });
-    }
+    void init(std::string_view name, ss::temporary_buffer<char> js_code);
+    void run(ss::temporary_buffer<char>& data);
 
 private:
     // Must be running in executor, because it runs js code
@@ -106,10 +73,9 @@ private:
     /// We need to controle execution time for js function
 
     /// \param buffer with data, wich js code can read and edit.
-    void run_internal(ss::temporary_buffer<char> data);
+    void run_internal(ss::temporary_buffer<char>& data);
 
     // Throw c++ exception from v8::TryCatch
-    void throw_exception_from_v8(std::string_view msg);
     void throw_exception_from_v8(
       const v8::TryCatch& try_catch, std::string_view msg);
 
@@ -118,60 +84,10 @@ private:
         void operator()(v8::Isolate* isolate) const { isolate->Dispose(); }
     };
 
-    // Stop v8 execution if it takes too much time
-    void stop_execution();
-    // Cancel stop execution for reusing isolate
-    void cancel_terminate_execution_for_isolate();
-
     std::unique_ptr<v8::Isolate, isolate_deleter> _isolate;
 
     v8::Global<v8::Context> _context;
     v8::Global<v8::Function> _function;
-
-    // Script timeout
-    std::chrono::milliseconds _timeout_ms;
-    // Timeout for run script in first time for initialization
-    static constexpr std::chrono::milliseconds _first_run_timeout_ms{500};
-
-    // This class implement task for executor. We need to add operator(),
-    // cancel(), on_timeout()
-    class task_for_executor {
-    public:
-        enum task_type { compile, run };
-
-        task_for_executor(
-          script& script, ss::temporary_buffer<char> data, task_type type)
-          : _script(script)
-          , _data(std::move(data))
-          , _type(type) {}
-
-        void operator()() {
-            switch (_type) {
-            case compile: {
-                _script.compile_script(std::move(_data));
-                break;
-            }
-            case run: {
-                _script.run_internal(std::move(_data));
-                break;
-            }
-            }
-        }
-
-        void cancel() noexcept { _script.stop_execution(); }
-
-        void on_timeout() noexcept {
-            _script.cancel_terminate_execution_for_isolate();
-        }
-
-    private:
-        script& _script;
-        ss::temporary_buffer<char> _data;
-
-        task_type _type;
-    };
-
-    friend class task_for_executor;
 };
 
 } // namespace v8_engine

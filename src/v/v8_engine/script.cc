@@ -13,21 +13,15 @@
 #include "utils/file_io.h"
 
 #include <seastar/core/future.hh>
-#include <seastar/core/lowres_clock.hh>
-#include <seastar/core/semaphore.hh>
-#include <seastar/core/sleep.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/util/later.hh>
 
-#include <chrono>
-#include <functional>
 #include <string_view>
 #include <utility>
 
 namespace v8_engine {
 
-script::script(size_t max_heap_size_in_bytes, size_t timeout_ms)
-  : _timeout_ms(timeout_ms) {
+script::script(size_t max_heap_size_in_bytes) {
     v8::Isolate::CreateParams isolate_params;
     isolate_params.array_buffer_allocator_shared
       = std::shared_ptr<v8::ArrayBuffer::Allocator>(
@@ -41,6 +35,11 @@ script::script(size_t max_heap_size_in_bytes, size_t timeout_ms)
 script::~script() {
     _function.Reset();
     _context.Reset();
+}
+
+void script::init(std::string_view name, ss::temporary_buffer<char> js_code) {
+    compile_script(std::move(js_code));
+    set_function(name);
 }
 
 void script::compile_script(ss::temporary_buffer<char> js_code) {
@@ -67,13 +66,7 @@ void script::compile_script(ss::temporary_buffer<char> js_code) {
     // Need to be running in executor.
     v8::Local<v8::Value> result;
     if (!compiled_script->Run(local_ctx).ToLocal(&result)) {
-        if (try_catch.Exception()->IsNull() && try_catch.Message().IsEmpty()) {
-            throw_exception_from_v8(
-              "Can not run script in first time(timeout)");
-        } else {
-            throw_exception_from_v8(
-              try_catch, "Can not run script in first time");
-        }
+        throw_exception_from_v8(try_catch, "Can not run script in first time");
     }
 
     _context.Reset(_isolate.get(), local_ctx);
@@ -99,7 +92,11 @@ void script::set_function(std::string_view name) {
     _function.Reset(_isolate.get(), function_val.As<v8::Function>());
 }
 
-void script::run_internal(ss::temporary_buffer<char> data) {
+// It is the first version for run. In next updates I use alient_thread for run
+// v8.
+void script::run(ss::temporary_buffer<char>& data) { run_internal(data); }
+
+void script::run_internal(ss::temporary_buffer<char>& data) {
     v8::Locker locker(_isolate.get());
     v8::Isolate::Scope isolate_scope(_isolate.get());
     v8::HandleScope handle_scope(_isolate.get());
@@ -120,17 +117,8 @@ void script::run_internal(ss::temporary_buffer<char> data) {
       _isolate.get(), _function);
     if (!local_function->Call(local_ctx, local_ctx->Global(), argc, argv)
            .ToLocal(&result)) {
-        // StopExecution generate exception without message
-        if (try_catch.Exception()->IsNull() && try_catch.Message().IsEmpty()) {
-            throw_exception_from_v8("Sript timeout");
-        } else {
-            throw_exception_from_v8(try_catch, "Can not run function");
-        }
+        throw_exception_from_v8(try_catch, "Can not run function");
     }
-}
-
-void script::throw_exception_from_v8(std::string_view msg) {
-    throw script_exception(fmt::format("{}", msg));
 }
 
 void script::throw_exception_from_v8(
@@ -138,18 +126,6 @@ void script::throw_exception_from_v8(
     v8::String::Utf8Value error(_isolate.get(), try_catch.Exception());
     throw script_exception(
       fmt::format("{}:{}", msg, std::string(*error, error.length())));
-}
-
-void script::stop_execution() {
-    if (!_isolate->IsExecutionTerminating()) {
-        _isolate->TerminateExecution();
-    }
-}
-
-void script::cancel_terminate_execution_for_isolate() {
-    if (_isolate->IsExecutionTerminating()) {
-        _isolate->CancelTerminateExecution();
-    }
 }
 
 } // namespace v8_engine
