@@ -14,6 +14,7 @@
 #include "cluster/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "v8_engine/script.h"
 
 #include <seastar/core/coroutine.hh>
 
@@ -211,6 +212,7 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
       properties.retention_duration, overrides.retention_duration);
     incremental_update(properties.segment_size, overrides.segment_size);
     incremental_update(properties.timestamp_type, overrides.timestamp_type);
+    incremental_update(properties.wasm_function, overrides.wasm_function);
 
     // generate deltas for controller backend
     std::vector<topic_table_delta> deltas;
@@ -346,6 +348,23 @@ topic_table::get_partition_assignment(const model::ntp& ntp) const {
     }
 
     return *p_it;
+}
+
+void topic_table::execute_wasm(model::ntp ntp) {
+    auto topic_cfg = get_topic_cfg(model::topic_namespace_view(ntp));
+    if (!topic_cfg.has_value()) {
+        return;
+        //return ss::now();
+    }
+
+    auto wasm_script_it = wasm_scripts.find(model::topic_namespace_view(ntp));
+    std::cout << topic_cfg->properties.wasm_function->_name << " " << topic_cfg->properties.wasm_function->_path << std::endl;
+    if (wasm_script_it == wasm_scripts.end()) {
+        wasm_script_it = wasm_scripts.emplace(model::topic_namespace_view(ntp), v8_engine::script(100, 10)).first;
+    }
+    return;
+
+    //return wasm_script_it->second.init(ss::sstring name, ss::temporary_buffer<char> js_code, Executor &executor)
 }
 
 } // namespace cluster

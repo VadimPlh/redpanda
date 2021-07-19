@@ -12,6 +12,7 @@
 #pragma once
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "model/wasm_function.h"
 #include "ssx/sformat.h"
 #include "tristate.h"
 
@@ -31,6 +32,8 @@ public:
         std::optional<model::compaction_strategy> compaction_strategy;
         // if not set, use the log_manager's configuration
         std::optional<size_t> segment_size;
+        // if not set, use notihng
+        std::optional<model::wasm_function> wasm_function;
 
         // partition retention settings. If tristate is disabled the feature
         // will be disabled if there is no value set the default will be used

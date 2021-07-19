@@ -9,6 +9,7 @@
 
 #include "kafka/server/handlers/fetch.h"
 
+#include "cluster/metadata_cache.h"
 #include "cluster/partition_manager.h"
 #include "cluster/shard_table.h"
 #include "config/configuration.h"
@@ -305,17 +306,22 @@ static void fill_fetch_responses(
     }
 }
 
+static void test_cache(cluster::metadata_cache& metadata_cache, model::ntp ntp) {
+    metadata_cache.execute_wasm(ntp);
+}
+
 static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
   cluster::partition_manager& mgr,
   std::vector<ntp_fetch_config> ntp_fetch_configs,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline, cluster::metadata_cache& metadata_cache) {
     return ssx::parallel_transform(
       std::move(ntp_fetch_configs),
-      [&mgr, deadline, foreign_read](const ntp_fetch_config& ntp_cfg) {
+      [&mgr, deadline, foreign_read, &metadata_cache](const ntp_fetch_config& ntp_cfg) {
           auto p_id = ntp_cfg.ntp().tp.partition;
           return do_read_from_ntp(mgr, ntp_cfg, foreign_read, deadline)
-            .then([p_id](read_result res) {
+            .then([p_id, &metadata_cache, ntp_cfg](read_result res) {
+                test_cache(metadata_cache, ntp_cfg.ntp());
                 res.partition = p_id;
                 return res;
             });
@@ -349,10 +355,11 @@ handle_shard_fetch(ss::shard_id shard, op_context& octx, shard_fetch fetch) {
         octx.ssg,
         [foreign_read,
          deadline = octx.deadline,
-         configs = std::move(fetch.requests)](
+         configs = std::move(fetch.requests),
+         &metadata_cache = octx.rctx.metadata_cache()](
           cluster::partition_manager& mgr) mutable {
             return fetch_ntps_in_parallel(
-              mgr, std::move(configs), foreign_read, deadline);
+              mgr, std::move(configs), foreign_read, deadline, metadata_cache);
         })
       .then([responses = std::move(fetch.responses),
              &octx](std::vector<read_result> results) mutable {

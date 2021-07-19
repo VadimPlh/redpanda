@@ -52,8 +52,8 @@ public:
 
     script(const script& other) = delete;
     script& operator=(const script& other) = delete;
-    script(script&& other) = delete;
-    script& operator=(script&& other) = delete;
+    script(script&& other) = default;
+    script& operator=(script&& other) = default;
 
     // Destroy instance. Be carefull!
     // First of all run Reset for all v8::Global fileds

@@ -96,6 +96,8 @@ public:
         return contains(model::topic_namespace_view(ntp), ntp.tp.partition);
     }
 
+    void execute_wasm(const model::ntp ntp);
+
     /// Returns metadata of all topics in cache internal format
     // const cache_t& all_metadata() const { return _cache; }
 

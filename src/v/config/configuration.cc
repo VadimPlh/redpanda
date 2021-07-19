@@ -1,4 +1,4 @@
-src/v/config/configuration.h// Copyright 2020 Vectorized, Inc.
+// Copyright 2020 Vectorized, Inc.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.md

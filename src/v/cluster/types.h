@@ -24,6 +24,7 @@
 #include "storage/ntp_config.h"
 #include "tristate.h"
 #include "utils/to_string.h"
+#include "model/wasm_function.h"
 
 #include <fmt/format.h>
 
@@ -312,6 +313,7 @@ struct topic_properties {
     std::optional<size_t> segment_size;
     tristate<size_t> retention_bytes;
     tristate<std::chrono::milliseconds> retention_duration;
+    std::optional<model::wasm_function> wasm_function;
 
     bool is_compacted() const;
     bool has_overrides() const;
@@ -344,6 +346,7 @@ struct incremental_topic_updates {
     property_update<std::optional<size_t>> segment_size;
     property_update<tristate<size_t>> retention_bytes;
     property_update<tristate<std::chrono::milliseconds>> retention_duration;
+    property_update<std::optional<model::wasm_function>> wasm_function;
 };
 
 /**
