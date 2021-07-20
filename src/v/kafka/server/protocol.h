@@ -20,6 +20,8 @@
 #include "security/authorizer.h"
 #include "security/credential_store.h"
 #include "utils/ema.h"
+#include "v8_engine/wasm_scripts_table.h"
+#include "v8_engine/executor.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
@@ -45,6 +47,7 @@ public:
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
+      ss::sharded<v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>>&,
       std::optional<qdc_monitor::config>) noexcept;
 
     ~protocol() noexcept override = default;
@@ -116,6 +119,10 @@ public:
         return _fetch_metadata_cache;
     }
 
+    v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& get_scripts_table() {
+        return _scripts_table.local();
+    }
+
 private:
     ss::smp_service_group _smp_group;
     ss::sharded<cluster::topics_frontend>& _topics_frontend;
@@ -134,6 +141,7 @@ private:
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
+    ss::sharded<v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>>& _scripts_table;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
 };

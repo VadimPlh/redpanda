@@ -508,6 +508,15 @@ void application::wire_up_redpanda_services() {
           .get();
     }
 
+    if (v8_engine_enabled()) {
+        syschecks::systemd_message("Building v8_engine env").get();
+        _v8_env.emplace();
+
+        auto& cfg = config::shard_local_cfg();
+        construct_single_service(_executor, cfg.core_for_executor, cfg.max_executor_queue_size);
+        construct_service(wasm_table, std::ref(*_executor)).get();
+    }
+
     syschecks::systemd_message("Intializing raft recovery throttle").get();
     recovery_throttle
       .start(
@@ -957,6 +966,7 @@ void application::start_redpanda() {
             controller->get_security_frontend(),
             controller->get_api(),
             tx_gateway_frontend,
+            wasm_table,
             qdc_config);
           s.set_protocol(std::move(proto));
       })
@@ -969,12 +979,6 @@ void application::start_redpanda() {
         construct_single_service(_wasm_event_listener, std::ref(pacemaker));
         _wasm_event_listener->start().get();
         pacemaker.invoke_on_all(&coproc::pacemaker::start).get();
-    }
-    if (v8_engine_enabled()) {
-        const auto& cfg = config::shard_local_cfg();
-        _v8_env.emplace();
-        construct_single_service(_v8_executor, cfg.core_for_executor, cfg.max_executor_queue_size);
-
     }
     if (config::shard_local_cfg().enable_admin_api()) {
         _admin.invoke_on_all(&admin_server::start).get0();

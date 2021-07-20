@@ -6,6 +6,9 @@ v_cc_library(
     script.cc
   DEPS
     Seastar::seastar
-    v8_monolith)
+    v8_monolith
+    absl::node_hash_map
+    v::model
+    v::utils)
 
 add_subdirectory(tests)

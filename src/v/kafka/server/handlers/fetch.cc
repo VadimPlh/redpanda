@@ -31,6 +31,7 @@
 #include "resource_mgmt/io_priority.h"
 #include "storage/parser_utils.h"
 #include "utils/to_string.h"
+#include "v8_engine/wasm_batch_consumer.h"
 
 #include <seastar/core/do_with.hh>
 #include <seastar/core/sleep.hh>
@@ -129,7 +130,7 @@ static ss::future<read_result> read_from_partition(
   kafka::partition_proxy part,
   fetch_config config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st) {
     auto hw = part.high_watermark();
     auto lso = part.last_stable_offset();
     auto start_o = part.start_offset();
@@ -151,7 +152,7 @@ static ss::future<read_result> read_from_partition(
     reader_config.strict_max_bytes = config.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
     auto result = co_await std::move(rdr).consume(
-      kafka_batch_serializer(), deadline ? *deadline : model::no_timeout);
+      v8_engine::wasm_batch_consumer<kafka::kafka_batch_serializer>(st, kafka_batch_serializer()), deadline ? *deadline : model::no_timeout);
     auto data = std::make_unique<iobuf>(std::move(result.data));
     std::vector<cluster::rm_stm::tx_range> aborted_transactions;
     part.probe().add_records_fetched(result.record_count);
@@ -180,7 +181,7 @@ static ss::future<read_result> do_read_from_ntp(
   cluster::partition_manager& mgr,
   ntp_fetch_config ntp_config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st) {
     /*
      * lookup the ntp's partition
      */
@@ -215,7 +216,7 @@ static ss::future<read_result> do_read_from_ntp(
     }
 
     return read_from_partition(
-      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline);
+      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline, st);
 }
 
 static ntp_fetch_config make_ntp_fetch_config(
@@ -228,9 +229,9 @@ ss::future<read_result> read_from_ntp(
   const model::materialized_ntp& ntp,
   fetch_config config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st) {
     return do_read_from_ntp(
-      pm, make_ntp_fetch_config(ntp, config), foreign_read, deadline);
+      pm, make_ntp_fetch_config(ntp, config), foreign_read, deadline, st);
 }
 
 static void fill_fetch_responses(
@@ -306,22 +307,17 @@ static void fill_fetch_responses(
     }
 }
 
-static void test_cache(cluster::metadata_cache& metadata_cache, model::ntp ntp) {
-    metadata_cache.execute_wasm(ntp);
-}
-
 static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
   cluster::partition_manager& mgr,
   std::vector<ntp_fetch_config> ntp_fetch_configs,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline, cluster::metadata_cache& metadata_cache) {
+  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st) {
     return ssx::parallel_transform(
       std::move(ntp_fetch_configs),
-      [&mgr, deadline, foreign_read, &metadata_cache](const ntp_fetch_config& ntp_cfg) {
+      [&mgr, deadline, foreign_read, &st](const ntp_fetch_config& ntp_cfg) {
           auto p_id = ntp_cfg.ntp().tp.partition;
-          return do_read_from_ntp(mgr, ntp_cfg, foreign_read, deadline)
-            .then([p_id, &metadata_cache, ntp_cfg](read_result res) {
-                test_cache(metadata_cache, ntp_cfg.ntp());
+          return do_read_from_ntp(mgr, ntp_cfg, foreign_read, deadline, st)
+            .then([p_id, ntp_cfg](read_result res) {
                 res.partition = p_id;
                 return res;
             });
@@ -356,10 +352,10 @@ handle_shard_fetch(ss::shard_id shard, op_context& octx, shard_fetch fetch) {
         [foreign_read,
          deadline = octx.deadline,
          configs = std::move(fetch.requests),
-         &metadata_cache = octx.rctx.metadata_cache()](
+         &scripts_table = octx.rctx.get_scripts_table()](
           cluster::partition_manager& mgr) mutable {
             return fetch_ntps_in_parallel(
-              mgr, std::move(configs), foreign_read, deadline, metadata_cache);
+              mgr, std::move(configs), foreign_read, deadline, scripts_table );
         })
       .then([responses = std::move(fetch.responses),
              &octx](std::vector<read_result> results) mutable {

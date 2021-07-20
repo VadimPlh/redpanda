@@ -132,6 +132,10 @@ public:
         return _conn->server().get_fetch_metadata_cache();
     }
 
+    v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& get_scripts_table() {
+        return _conn->server().get_scripts_table();
+    }
+
     // clang-format off
     template<typename ResponseType>
     CONCEPT(requires requires (

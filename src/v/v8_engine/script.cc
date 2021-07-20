@@ -23,6 +23,7 @@
 #include <functional>
 #include <string_view>
 #include <utility>
+#include <v8.h>
 
 namespace v8_engine {
 
