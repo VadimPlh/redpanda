@@ -54,7 +54,7 @@ struct work_item {
 };
 
 // This class implement task for executor. Contains promise logic
-template<typename Func>
+template<typename Func, typename ReturnType>
 struct task final : work_item {
     task(Func&& f, std::chrono::milliseconds timeout)
       : work_item()
@@ -77,7 +77,7 @@ struct task final : work_item {
 
     // Process task from executor in executor thread and set state in ss::future
     void process() noexcept override {
-        func_wrapper([this] { _func(); });
+        func_wrapper([this] { return_obj.emplace(_func()); });
     }
 
     // Run this function for cancel task execution
@@ -100,12 +100,12 @@ struct task final : work_item {
 
     // Get future from seastar thread for waiting when executor thread will
     // complete task
-    ss::future<> get_future() {
-        return _on_done.wait().discard_result().then([this] {
+    ss::future<ReturnType> get_future() {
+        return _on_done.wait().discard_result().then([this]() -> ss::future<ReturnType> {
             if (_exception) {
-                return ss::make_exception_future(_exception);
+                return ss::make_exception_future<ReturnType>(_exception);
             } else {
-                return ss::now();
+                return ss::make_ready_future<ReturnType>(std::move(return_obj.value()));
             }
         });
     }
@@ -114,6 +114,8 @@ struct task final : work_item {
     seastar::readable_eventfd _on_done;
 
     std::chrono::milliseconds _timeout;
+
+    std::optional<ReturnType> return_obj;
 };
 
 // This class implement queue for submit task from seastar to std::thread. Only
@@ -177,25 +179,25 @@ public:
     /// \param func_for_executor is v8 script
 
     // clang-format off
-    template<typename WrapperFuncForExecutor>
+    template<typename WrapperFuncForExecutor, typename ReturnType>
     CONCEPT(requires requires(WrapperFuncForExecutor func) {
-        { func() } -> std::same_as<void>;
+        //{ func() } -> std::same_as<void>;
         { func.cancel() } -> std::same_as<void>;
         { func.on_timeout() } -> std::same_as<void>;
     })
     // clang-format on
 
-    ss::future<> submit(
+    ss::future<ReturnType> submit(
       WrapperFuncForExecutor&& func_for_executor,
       std::chrono::milliseconds timeout) {
         gate_guard guard{_gate};
 
         auto new_task
-          = std::make_unique<internal::task<WrapperFuncForExecutor>>(
+          = std::make_unique<internal::task<WrapperFuncForExecutor, ReturnType>>(
             std::forward<WrapperFuncForExecutor>(func_for_executor), timeout);
 
         co_await _tasks.push(new_task.get());
-        co_await new_task->get_future();
+        co_return co_await new_task->get_future();
     }
 
 private:
@@ -234,8 +236,8 @@ public:
         return _executor_wrapper.start_single(_core, _size);
     }
 
-    template<typename WrapperFuncForExecutor>
-    ss::future<> submit(
+    template<typename WrapperFuncForExecutor, typename ReturnType>
+    ss::future<ReturnType> submit(
       WrapperFuncForExecutor&& func_for_executor,
       std::chrono::milliseconds timeout) {
         return _executor_wrapper.invoke_on(
@@ -243,7 +245,7 @@ public:
           [func_for_executor = std::forward<WrapperFuncForExecutor>(
              func_for_executor),
            timeout](executor& ex) mutable {
-              ex.submit(
+              return ex.submit<WrapperFuncForExecutor, ReturnType>(
                 std::forward<WrapperFuncForExecutor>(func_for_executor),
                 timeout);
           });

@@ -514,6 +514,7 @@ void application::wire_up_redpanda_services() {
 
         auto& cfg = config::shard_local_cfg();
         construct_single_service(_executor, cfg.core_for_executor, cfg.max_executor_queue_size);
+        _executor->start().get();
         construct_service(wasm_table, std::ref(*_executor)).get();
     }
 

@@ -10,7 +10,12 @@
 
 #include "v8_engine/script.h"
 
+#include "model/record.h"
+#include "model/record_utils.h"
+#include "seastar/core/coroutine.hh"
 #include "utils/file_io.h"
+
+#include "v8_engine/v8_wrapper.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -44,12 +49,27 @@ script::~script() {
     _context.Reset();
 }
 
-void script::compile_script(ss::temporary_buffer<char> js_code) {
+static void LogCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+    v8::Local<v8::Value> arg = args[0];
+    v8::String::Utf8Value value(isolate, arg);
+    std::cout << std::string(*value, value.length()) << std::endl;
+}
+
+bool script::compile_script(ss::temporary_buffer<char> js_code) {
     v8::Locker locker(_isolate.get());
     v8::Isolate::Scope isolate_scope(_isolate.get());
     v8::HandleScope handle_scope(_isolate.get());
     v8::TryCatch try_catch(_isolate.get());
-    v8::Local<v8::Context> local_ctx = v8::Context::New(_isolate.get());
+    v8::Local<v8::ObjectTemplate> global = v8::ObjectTemplate::New(
+      _isolate.get());
+    global->Set(
+      _isolate.get(),
+      "log",
+      v8::FunctionTemplate::New(_isolate.get(), LogCallback));
+    v8::Local<v8::Context> local_ctx = v8::Context::New(
+      _isolate.get(), nullptr, global);
     v8::Context::Scope context_scope(local_ctx);
 
     v8::Local<v8::String> script_code = v8::String::NewFromUtf8(
@@ -78,6 +98,7 @@ void script::compile_script(ss::temporary_buffer<char> js_code) {
     }
 
     _context.Reset(_isolate.get(), local_ctx);
+    return true;
 }
 
 void script::set_function(std::string_view name) {
@@ -100,7 +121,38 @@ void script::set_function(std::string_view name) {
     _function.Reset(_isolate.get(), function_val.As<v8::Function>());
 }
 
-void script::run_internal(ss::temporary_buffer<char> data) {
+/*
+static void produce(
+  v8::Local<v8::Name>,
+  v8::Local<v8::Value> value,
+  const v8::PropertyCallbackInfo<void>& info) {
+    // v8::Local<v8::Object> self = info.Holder();
+    // v8::Local<v8::External> wrap = v8::Local<v8::External>::Cast(
+    //  self->GetInternalField(0));
+    // auto record_batch_ptr =
+    // static_cast<record_batch_wrapper*>(wrap->Value());
+
+    auto map = v8::Map::Cast(*value);
+    std::cout << "CAST MAP" << std::endl;
+
+    auto key = map
+                 ->Get(
+                   info.GetIsolate()->GetCurrentContext(),
+                   v8::String::NewFromUtf8(info.GetIsolate(), "value")
+                     .ToLocalChecked())
+                 .ToLocalChecked();
+    std::cout << "GET KEY" << std::endl;
+    auto array = v8::ArrayBuffer::Cast(*key);
+    std::cout << "GET ARRAY" << std::endl;
+    auto store = array->GetBackingStore();
+    std::cout << "GET STORE" << std::endl;
+    ss::temporary_buffer<char> key_buf(
+      reinterpret_cast<char*>(store->Data()), store->ByteLength());
+    std::cout << std::string(key_buf.get_write(), key_buf.size()) << std::endl;
+}
+*/
+
+model::record_batch script::run_internal(model::record_batch data) {
     v8::Locker locker(_isolate.get());
     v8::Isolate::Scope isolate_scope(_isolate.get());
     v8::HandleScope handle_scope(_isolate.get());
@@ -110,11 +162,30 @@ void script::run_internal(ss::temporary_buffer<char> data) {
     v8::Context::Scope context_scope(local_ctx);
 
     const int argc = 1;
-    auto store = v8::ArrayBuffer::NewBackingStore(
-      data.get_write(), data.size(), v8::BackingStore::EmptyDeleter, nullptr);
-    auto data_array_buf = v8::ArrayBuffer::New(
-      _isolate.get(), std::move(store));
-    v8::Local<v8::Value> argv[argc] = {data_array_buf};
+    // auto store = v8::ArrayBuffer::NewBackingStore(
+    //  data.get_write(), data.size(), v8::BackingStore::EmptyDeleter, nullptr);
+    // auto data_array_buf = v8::ArrayBuffer::New(
+    //  _isolate.get(), std::move(store));
+
+    v8::Local<v8::ObjectTemplate> obj_templ = v8::ObjectTemplate::New(
+      _isolate.get());
+    obj_templ->SetInternalFieldCount(1);
+    obj_templ->SetAccessor(
+      v8::String::NewFromUtf8(_isolate.get(), "size").ToLocalChecked(), size);
+
+    obj_templ->SetIndexedPropertyHandler(get_record);
+
+    obj_templ->SetAccessor(
+      v8::String::NewFromUtf8(_isolate.get(), "produce").ToLocalChecked(),
+      nullptr, produce);
+
+    record_batch_wrapper batch(std::move(data));
+
+    v8::Local<v8::Object> obj
+      = obj_templ->NewInstance(local_ctx).ToLocalChecked();
+    obj->SetInternalField(0, v8::External::New(_isolate.get(), &batch));
+
+    v8::Local<v8::Value> argv[argc] = {obj};
     v8::Local<v8::Value> result;
 
     v8::Local<v8::Function> local_function = v8::Local<v8::Function>::New(
@@ -128,6 +199,8 @@ void script::run_internal(ss::temporary_buffer<char> data) {
             throw_exception_from_v8(try_catch, "Can not run function");
         }
     }
+
+    return batch.convert_to_batch();
 }
 
 void script::throw_exception_from_v8(std::string_view msg) {

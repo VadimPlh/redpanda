@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "model/record.h"
+#include "model/record_utils.h"
 #include "seastarx.h"
 #include "v8_engine/environment.h"
 
@@ -19,6 +21,7 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/timer.hh>
+#include "seastar/core/coroutine.hh"
 
 #include <chrono>
 #include <v8.h>
@@ -71,9 +74,10 @@ public:
       ss::temporary_buffer<char> js_code,
       Executor& executor) {
         compile_task task(*this, std::move(js_code));
-        return add_future_handlers(
-                 executor.submit(
-                   std::forward<compile_task>(task), _first_run_timeout_ms))
+        return
+                 executor.template submit<compile_task, bool>(
+                   std::forward<compile_task>(task), _first_run_timeout_ms)
+                   .discard_result()
           .then([this, name] { set_function(name); });
     }
 
@@ -82,16 +86,16 @@ public:
     /// \param data for js script
     /// \param executor for run script
     template<typename Executor>
-    ss::future<> run(ss::temporary_buffer<char> data, Executor& executor) {
+    ss::future<model::record_batch> run(model::record_batch data, Executor& executor) {
         run_task task(*this, std::move(data));
-        return add_future_handlers(
-          executor.submit(std::forward<run_task>(task), _timeout_ms));
+        return
+          executor.template submit<run_task, model::record_batch>(std::forward<run_task>(task), _timeout_ms);
     }
 
 private:
     // Must be running in executor, because it runs js code
     // in first time for init global vars and e.t.c.
-    void compile_script(ss::temporary_buffer<char> js_code);
+    bool compile_script(ss::temporary_buffer<char> js_code);
 
     // Init function from compiled js code.
     void set_function(std::string_view name);
@@ -102,14 +106,15 @@ private:
     /// We need to controle execution time for js function
 
     /// \param buffer with data, wich js code can read and edit.
-    void run_internal(ss::temporary_buffer<char> data);
+    model::record_batch run_internal(model::record_batch data);
 
     // Throw c++ exception from v8::TryCatch
     void throw_exception_from_v8(std::string_view msg);
     void throw_exception_from_v8(
       const v8::TryCatch& try_catch, std::string_view msg);
 
-    ss::future<> add_future_handlers(ss::future<>&& fut) {
+    template<typename ReturnType>
+    ss::future<ReturnType> add_future_handlers(ss::future<ReturnType>&& fut) {
         return fut
           .handle_exception_type([this](ss::gate_closed_exception&) {
               throw_exception_from_v8("Executor is stopped");
@@ -139,14 +144,10 @@ private:
 
     // This class implement task for executor. We need to add operator(),
     // cancel(), on_timeout()
-
     class task_for_executor {
     public:
-        task_for_executor(script& script, ss::temporary_buffer<char> data)
-          : _script(script)
-          , _data(std::move(data)) {}
-
-        virtual void operator()() = 0;
+        explicit task_for_executor(script& script)
+          : _script(script) {}
 
         void cancel() { _script.stop_execution(); }
 
@@ -154,7 +155,6 @@ private:
 
     protected:
         script& _script;
-        ss::temporary_buffer<char> _data;
     };
 
     friend class task_for_executor;
@@ -162,17 +162,21 @@ private:
     class compile_task : public task_for_executor {
     public:
         compile_task(script& script, ss::temporary_buffer<char> data)
-          : task_for_executor(script, std::move(data)) {}
+          : task_for_executor(script), _data(std::move(data)) {}
 
-        void operator()() override { _script.compile_script(std::move(_data)); }
+        bool operator()() { return _script.compile_script(std::move(_data)); }
+
+        ss::temporary_buffer<char> _data;
     };
 
     class run_task : public task_for_executor {
     public:
-        run_task(script& script, ss::temporary_buffer<char> data)
-          : task_for_executor(script, std::move(data)) {}
+        run_task(script& script, model::record_batch data)
+          : task_for_executor(script), _data(std::move(data)) {}
 
-        void operator()() override { _script.run_internal(std::move(_data)); }
+        model::record_batch operator()() { return _script.run_internal(std::move(_data)); }
+
+        model::record_batch _data;
     };
 };
 

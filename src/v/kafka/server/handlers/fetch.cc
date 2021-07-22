@@ -130,7 +130,7 @@ static ss::future<read_result> read_from_partition(
   kafka::partition_proxy part,
   fetch_config config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st) {
+  std::optional<model::timeout_clock::time_point> deadline, v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& st, model::ntp ntp) {
     auto hw = part.high_watermark();
     auto lso = part.last_stable_offset();
     auto start_o = part.start_offset();
@@ -152,7 +152,7 @@ static ss::future<read_result> read_from_partition(
     reader_config.strict_max_bytes = config.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
     auto result = co_await std::move(rdr).consume(
-      v8_engine::wasm_batch_consumer<kafka::kafka_batch_serializer>(st, kafka_batch_serializer()), deadline ? *deadline : model::no_timeout);
+      v8_engine::wasm_batch_consumer<kafka::kafka_batch_serializer>(st, kafka_batch_serializer(), ntp), deadline ? *deadline : model::no_timeout);
     auto data = std::make_unique<iobuf>(std::move(result.data));
     std::vector<cluster::rm_stm::tx_range> aborted_transactions;
     part.probe().add_records_fetched(result.record_count);
@@ -216,7 +216,7 @@ static ss::future<read_result> do_read_from_ntp(
     }
 
     return read_from_partition(
-      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline, st);
+      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline, st, ntp_config.ntp());
 }
 
 static ntp_fetch_config make_ntp_fetch_config(

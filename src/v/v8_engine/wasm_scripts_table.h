@@ -10,6 +10,7 @@
 #pragma once
 
 #include "model/fundamental.h"
+#include "model/record_utils.h"
 #include "model/wasm_function.h"
 #include "seastarx.h"
 #include "utils/file_io.h"
@@ -20,6 +21,7 @@
 #include <seastar/core/temporary_buffer.hh>
 
 #include <absl/container/node_hash_map.h>
+#include <tuple>
 
 namespace v8_engine {
 
@@ -29,41 +31,41 @@ public:
     explicit wasm_scripts_table(Executor& executor)
     : _executor(executor) {}
 
-    ss::future<> run(model::ntp ntp, model::wasm_function topic_wasm_prop) {
+    ss::future<model::record_batch> run(model::ntp ntp, model::wasm_function topic_wasm_prop, model::record_batch&& batch) {
         if (topic_wasm_prop._path.empty()) {
-            co_return;
+            throw "GGGGGG";
         }
 
         co_await init_script(ntp, topic_wasm_prop);
-        co_await run_script(ntp);
+        co_return co_await run_script(ntp, std::forward<model::record_batch>(batch));
     }
 
 private:
     ss::future<>
     init_script(model::ntp ntp, model::wasm_function topic_wasm_prop) {
+        std::cout << 1 << std::endl;
         auto it = _scripts.find(ntp);
         if (it == _scripts.end()) {
+            std::cout << 2 << std::endl;
             it = _scripts.emplace(ntp, script(100, 100)).first;
-
-            script* script_ptr = &it->second;
+            std::cout << 3 << std::endl;
 
             ss::temporary_buffer<char> wasm_code = co_await read_fully_tmpbuf(
               std::filesystem::path(topic_wasm_prop._path));
-            co_await script_ptr->init(
+              std::cout << 4 << std::endl;
+            co_await it->second.init(
               topic_wasm_prop._name, std::move(wasm_code), _executor);
         }
         co_return;
     }
 
-    ss::future<> run_script(model::ntp ntp) {
+    ss::future<model::record_batch> run_script(model::ntp ntp, model::record_batch&& batch) {
         auto it = _scripts.find(ntp);
         if (it == _scripts.end()) {
-            co_return;
+            throw "123";
         }
         script* script_ptr = &it->second;
-
-        ss::temporary_buffer<char> buf;
-        co_await script_ptr->run(std::move(buf), _executor);
+        co_return co_await script_ptr->run(std::forward<model::record_batch>(batch), _executor);
     }
 
     absl::node_hash_map<model::ntp, script> _scripts;

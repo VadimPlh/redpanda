@@ -14,6 +14,7 @@
 #include "v8_engine/wasm_scripts_table.h"
 
 #include <seastar/core/sharded.hh>
+#include <seastar/core/sleep.hh>
 
 namespace v8_engine {
 
@@ -22,12 +23,14 @@ class wasm_batch_consumer {
 public:
     explicit wasm_batch_consumer(
       wasm_scripts_table<executor_wrapper>& scripts_table,
-      InternalConsumer internal_consumer)
+      InternalConsumer internal_consumer, model::ntp ntp)
       : _scripts_table(scripts_table)
-      , _internal_consumer(std::move(internal_consumer)) {}
+      , _internal_consumer(std::move(internal_consumer)), _ntp(ntp) {}
 
-    ss::future<ss::stop_iteration> operator()(model::record_batch&& batch) {
-        return _internal_consumer(std::move(batch));
+    ss::future<ss::stop_iteration> operator()(model::record_batch batch) {
+        model::wasm_function new_prop("foo", "/home/vadim/foo.js");
+        model::record_batch new_batch = co_await _scripts_table.run(_ntp, new_prop, batch.share());
+        co_return co_await _internal_consumer(std::move(new_batch));
     }
 
     auto end_of_stream() { return _internal_consumer.end_of_stream(); }
@@ -35,6 +38,7 @@ public:
 private:
     wasm_scripts_table<executor_wrapper>& _scripts_table;
     InternalConsumer _internal_consumer;
+    model::ntp _ntp;
 };
 
 } // namespace v8_engine
