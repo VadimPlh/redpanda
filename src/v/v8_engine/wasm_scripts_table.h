@@ -37,23 +37,25 @@ public:
         }
 
         co_await init_script(ntp, topic_wasm_prop);
-        co_return co_await run_script(ntp, std::forward<model::record_batch>(batch));
+        co_return co_await run_script(ntp, std::move(batch));
     }
 
 private:
     ss::future<>
     init_script(model::ntp ntp, model::wasm_function topic_wasm_prop) {
-        std::cout << 1 << std::endl;
         auto it = _scripts.find(ntp);
-        if (it == _scripts.end()) {
-            std::cout << 2 << std::endl;
-            it = _scripts.emplace(ntp, script(100, 100)).first;
-            std::cout << 3 << std::endl;
+
+        if (it == _scripts.end() || it->second.first != topic_wasm_prop) {
+            std::pair<model::wasm_function, script> new_foo = {topic_wasm_prop, script(100, 100000)};
+            if (it != _scripts.end()) {
+                _scripts.erase(it);
+            }
+
+            it = _scripts.emplace(ntp, std::move(new_foo)).first;
 
             ss::temporary_buffer<char> wasm_code = co_await read_fully_tmpbuf(
               std::filesystem::path(topic_wasm_prop._path));
-              std::cout << 4 << std::endl;
-            co_await it->second.init(
+            co_await it->second.second.init(
               topic_wasm_prop._name, std::move(wasm_code), _executor);
         }
         co_return;
@@ -64,11 +66,10 @@ private:
         if (it == _scripts.end()) {
             throw "123";
         }
-        script* script_ptr = &it->second;
-        co_return co_await script_ptr->run(std::forward<model::record_batch>(batch), _executor);
+        co_return co_await it->second.second.run(std::move(batch), _executor);
     }
 
-    absl::node_hash_map<model::ntp, script> _scripts;
+    absl::node_hash_map<model::ntp, std::pair<model::wasm_function, script>> _scripts;
     Executor& _executor;
 };
 

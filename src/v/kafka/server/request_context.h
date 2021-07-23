@@ -90,6 +90,10 @@ public:
         return _conn->server().metadata_cache();
     }
 
+    ss::sharded<cluster::metadata_cache>& mc() {
+        return _conn->server().mc();
+    }
+
     cluster::topics_frontend& topics_frontend() const {
         return _conn->server().topics_frontend();
     }

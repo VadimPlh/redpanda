@@ -33,6 +33,10 @@ public:
     wasm_function(std::string_view name, std::string_view path)
     : _name(name), _path(path) {}
 
+    bool operator!=(const wasm_function& other) {
+        return _name != other._name || _path != other._path;
+    }
+
     ss::sstring _name;
     ss::sstring _path;
     //std::chrono::milliseconds _timeout;

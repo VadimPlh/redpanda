@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include "cluster/topic_table.h"
 #include "model/record_utils.h"
 #include "v8_engine/executor.h"
 #include "v8_engine/wasm_scripts_table.h"
@@ -23,13 +24,14 @@ class wasm_batch_consumer {
 public:
     explicit wasm_batch_consumer(
       wasm_scripts_table<executor_wrapper>& scripts_table,
-      InternalConsumer internal_consumer, model::ntp ntp)
+      InternalConsumer internal_consumer, model::ntp ntp,
+      model::wasm_function wasm_function)
       : _scripts_table(scripts_table)
-      , _internal_consumer(std::move(internal_consumer)), _ntp(ntp) {}
+      , _internal_consumer(std::move(internal_consumer)), _ntp(ntp),
+      _wasm_function(wasm_function) {}
 
-    ss::future<ss::stop_iteration> operator()(model::record_batch batch) {
-        model::wasm_function new_prop("foo", "/home/vadim/foo.js");
-        model::record_batch new_batch = co_await _scripts_table.run(_ntp, new_prop, batch.share());
+    ss::future<ss::stop_iteration> operator()(model::record_batch&& batch) {
+        model::record_batch new_batch = co_await _scripts_table.run(_ntp, _wasm_function , std::move(batch));
         co_return co_await _internal_consumer(std::move(new_batch));
     }
 
@@ -39,6 +41,7 @@ private:
     wasm_scripts_table<executor_wrapper>& _scripts_table;
     InternalConsumer _internal_consumer;
     model::ntp _ntp;
+    model::wasm_function _wasm_function;
 };
 
 } // namespace v8_engine

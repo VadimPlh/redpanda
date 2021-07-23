@@ -68,6 +68,9 @@ public:
     cluster::metadata_cache& metadata_cache() {
         return _metadata_cache.local();
     }
+    ss::sharded<cluster::metadata_cache>& mc() {
+        return _metadata_cache;
+    }
     cluster::id_allocator_frontend& id_allocator_frontend() {
         return _id_allocator_frontend.local();
     }
