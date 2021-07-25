@@ -32,14 +32,14 @@
 
 namespace v8_engine {
 
-script::script(size_t max_heap_size_in_bytes, size_t timeout_ms)
+script::script(size_t , size_t timeout_ms)
   : _timeout_ms(timeout_ms) {
     v8::Isolate::CreateParams isolate_params;
     isolate_params.array_buffer_allocator_shared
       = std::shared_ptr<v8::ArrayBuffer::Allocator>(
         v8::ArrayBuffer::Allocator::NewDefaultAllocator());
-    isolate_params.constraints.ConfigureDefaultsFromHeapSize(
-      0, max_heap_size_in_bytes);
+    //isolate_params.constraints.ConfigureDefaultsFromHeapSize(
+    //  0, max_heap_size_in_bytes);
     _isolate = std::unique_ptr<v8::Isolate, isolate_deleter>(
       v8::Isolate::New(isolate_params), isolate_deleter());
 }

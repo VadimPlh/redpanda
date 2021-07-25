@@ -145,37 +145,25 @@ static ss::future<read_result> read_from_partition(
         co_return read_result(start_o, hw, lso);
     }
 
-    auto wf = co_await mc.map_reduce0(
-      [ntp](cluster::metadata_cache& cache) {
-          return cache.get_topic_cfg(model::topic_namespace_view(ntp))
-            ->properties.wasm_function;
-      },
-      std::optional<model::wasm_function>(),
-      [](std::optional<model::wasm_function> ans, std::optional<model::wasm_function> foo) {
-          if (foo.has_value()) {
-              ans.emplace(foo.value());
-          }
-          return ans;
-      });
+    auto wf = mc.local()
+                .get_topic_cfg(model::topic_namespace_view(ntp))
+                ->properties.wasm_function;
 
-      storage::log_reader_config reader_config(
-        config.start_offset,
-        config.max_offset,
-        0,
-        config.max_bytes,
-        kafka_read_priority(),
-        std::nullopt,
-        std::nullopt,
-        std::nullopt);
+    storage::log_reader_config reader_config(
+      config.start_offset,
+      config.max_offset,
+      0,
+      config.max_bytes,
+      kafka_read_priority(),
+      std::nullopt,
+      std::nullopt,
+      std::nullopt);
 
     reader_config.strict_max_bytes = config.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
     auto result = co_await std::move(rdr).consume(
       v8_engine::wasm_batch_consumer<kafka::kafka_batch_serializer>(
-        st,
-        kafka_batch_serializer(),
-        ntp,
-        wf.value()),
+        st, kafka_batch_serializer(), ntp, wf.value()),
       deadline ? *deadline : model::no_timeout);
     auto data = std::make_unique<iobuf>(std::move(result.data));
     std::vector<cluster::rm_stm::tx_range> aborted_transactions;
@@ -350,7 +338,8 @@ static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
   ss::sharded<cluster::metadata_cache>& mc) {
     return ssx::parallel_transform(
       std::move(ntp_fetch_configs),
-      [&mgr, deadline, foreign_read, &st, &mc](const ntp_fetch_config& ntp_cfg) {
+      [&mgr, deadline, foreign_read, &st, &mc](
+        const ntp_fetch_config& ntp_cfg) {
           auto p_id = ntp_cfg.ntp().tp.partition;
           return do_read_from_ntp(mgr, ntp_cfg, foreign_read, deadline, st, mc)
             .then([p_id, ntp_cfg](read_result res) {

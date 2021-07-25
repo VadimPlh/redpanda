@@ -31,7 +31,7 @@ public:
     explicit wasm_scripts_table(Executor& executor)
     : _executor(executor) {}
 
-    ss::future<model::record_batch> run(model::ntp ntp, model::wasm_function topic_wasm_prop, model::record_batch&& batch) {
+    ss::future<model::record_batch> run(model::ntp ntp, model::wasm_function topic_wasm_prop, model::record_batch batch) {
         if (topic_wasm_prop._path.empty()) {
             throw "GGGGGG";
         }
@@ -61,7 +61,7 @@ private:
         co_return;
     }
 
-    ss::future<model::record_batch> run_script(model::ntp ntp, model::record_batch&& batch) {
+    ss::future<model::record_batch> run_script(model::ntp ntp, model::record_batch batch) {
         auto it = _scripts.find(ntp);
         if (it == _scripts.end()) {
             throw "123";

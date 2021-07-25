@@ -31,7 +31,7 @@ public:
       _wasm_function(wasm_function) {}
 
     ss::future<ss::stop_iteration> operator()(model::record_batch&& batch) {
-        model::record_batch new_batch = co_await _scripts_table.run(_ntp, _wasm_function , std::move(batch));
+        model::record_batch new_batch = co_await _scripts_table.run(_ntp, _wasm_function , batch.share());
         co_return co_await _internal_consumer(std::move(new_batch));
     }
 

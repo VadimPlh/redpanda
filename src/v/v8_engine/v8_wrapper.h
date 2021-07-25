@@ -34,7 +34,6 @@ struct record_wrapper {
     record_wrapper() = default;
     explicit record_wrapper(model::record& record) {
         size_bytes = record.size_bytes();
-        std::cout << size_bytes << std::endl;
         offset = record.offset_delta();
         timestamp = record.timestamp_delta();
         key = get_buf(record.release_key());
@@ -80,7 +79,7 @@ struct record_batch_wrapper {
               {},
               r.timestamp,
               r.offset,
-              key_size,
+              key_size == 0 ? -1 : key_size,
               std::move(key),
               value_size,
               std::move(value),
@@ -89,11 +88,12 @@ struct record_batch_wrapper {
             model::append_record_to_buffer(serialize_reords, new_record);
         }
 
-        header.record_count = new_records.size();
+
         header.size_bytes = serialize_reords.size_bytes()
                             + model::packed_record_batch_header_size;
+        header.record_count = new_records.size();
         header.crc = model::crc_record_batch(header, serialize_reords);
-        model::record_batch new_batch(header, std::move(serialize_reords));
+         model::record_batch new_batch(header, std::move(serialize_reords));
         return new_batch;
     }
 
@@ -110,8 +110,6 @@ size(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
       self->GetInternalField(0));
     auto record_batch_ptr = static_cast<record_batch_wrapper*>(wrap->Value());
 
-    std::cout << record_batch_ptr->old_records.size() << std::endl;
-
     info.GetReturnValue().Set(
       static_cast<uint32_t>(record_batch_ptr->old_records.size()));
 }
@@ -124,7 +122,7 @@ get_record(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info) {
     auto record_batch_ptr = static_cast<record_batch_wrapper*>(wrap->Value());
 
     if (index >= record_batch_ptr->old_records.size()) {
-        throw "GOVNO";
+        throw "123";
     }
 
     auto map = v8::Map::New(info.GetIsolate());
@@ -211,10 +209,6 @@ inline void produce(
     produce_record.value = ss::temporary_buffer<char>(
       reinterpret_cast<char*>(store->Data()), store->ByteLength());
 
-    std::cout << std::string(
-      produce_record.value.get_write(), produce_record.value.size())
-              << std::endl;
-
     key = map
             ->Get(
               info.GetIsolate()->GetCurrentContext(),
@@ -224,8 +218,6 @@ inline void produce(
     auto integer = v8::Integer::Cast(*key);
     produce_record.offset = integer->Value();
 
-    std::cout << produce_record.offset << std::endl;
-
     key = map
             ->Get(
               info.GetIsolate()->GetCurrentContext(),
@@ -233,7 +225,7 @@ inline void produce(
                 .ToLocalChecked())
             .ToLocalChecked();
     integer = v8::Integer::Cast(*key);
-    produce_record.offset = integer->Value();
+    produce_record.timestamp = integer->Value();
 
     key = map
             ->Get(
