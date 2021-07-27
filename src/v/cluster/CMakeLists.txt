@@ -81,5 +81,6 @@ v_cc_library(
     Roaring::roaring
     absl::flat_hash_map
     v::model
+    v::v8_engine
   )
 add_subdirectory(tests)

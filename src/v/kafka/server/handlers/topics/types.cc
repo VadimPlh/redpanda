@@ -95,6 +95,7 @@ cluster::topic_configuration to_cluster_type(const creatable_topic& t) {
     cfg.properties.retention_duration
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_duration);
+    cfg.properties.wasm_function = get_config_value<model::wasm_function>(config_entries, topic_property_wasm_function);
 
     return cfg;
 }

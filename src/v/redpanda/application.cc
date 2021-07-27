@@ -49,6 +49,7 @@
 #include "test_utils/logs.h"
 #include "utils/file_io.h"
 #include "utils/human.h"
+#include "v8_engine/environment.h"
 #include "version.h"
 #include "vlog.h"
 
@@ -511,6 +512,16 @@ void application::wire_up_redpanda_services() {
           .get();
     }
 
+    if (v8_engine_enabled()) {
+        syschecks::systemd_message("Building v8_engine env").get();
+        _v8_env.emplace();
+
+        auto& cfg = config::shard_local_cfg();
+        construct_single_service(_executor, cfg.core_for_executor, cfg.max_executor_queue_size);
+        _executor->start().get();
+        construct_service(wasm_table, std::ref(*_executor)).get();
+    }
+
     syschecks::systemd_message("Intializing raft recovery throttle").get();
     recovery_throttle
       .start(
@@ -960,6 +971,7 @@ void application::start_redpanda() {
             controller->get_security_frontend(),
             controller->get_api(),
             tx_gateway_frontend,
+            wasm_table,
             qdc_config);
           s.set_protocol(std::move(proto));
       })

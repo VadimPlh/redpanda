@@ -15,6 +15,7 @@
 #include "cluster/types.h"
 #include "model/fundamental.h"
 #include "utils/expiring_promise.h"
+#include "v8_engine/script.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -133,6 +134,8 @@ public:
 
     const underlying_t& topics_map() const { return _topics; }
 
+    void execute_wasm(const model::ntp);
+
 private:
     struct waiter {
         explicit waiter(uint64_t id)
@@ -159,5 +162,11 @@ private:
     std::vector<std::pair<cluster::notification_id_type, delta_cb_t>>
       _notifications;
     uint64_t _waiter_id{0};
+
+    absl::flat_hash_map<
+      model::topic_namespace,
+      v8_engine::script,
+      model::topic_namespace_hash,
+      model::topic_namespace_eq> wasm_scripts;
 };
 } // namespace cluster

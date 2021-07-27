@@ -90,6 +90,10 @@ public:
         return _conn->server().metadata_cache();
     }
 
+    ss::sharded<cluster::metadata_cache>& mc() {
+        return _conn->server().mc();
+    }
+
     cluster::topics_frontend& topics_frontend() const {
         return _conn->server().topics_frontend();
     }
@@ -130,6 +134,10 @@ public:
 
     fetch_metadata_cache& get_fetch_metadata_cache() {
         return _conn->server().get_fetch_metadata_cache();
+    }
+
+    v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>& get_scripts_table() {
+        return _conn->server().get_scripts_table();
     }
 
     // clang-format off

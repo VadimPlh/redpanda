@@ -85,6 +85,8 @@ create_topic_properties_update(alter_configs_resource& resource) {
       = cluster::incremental_update_operation::set;
     update.properties.retention_duration.op
       = cluster::incremental_update_operation::set;
+    update.properties.wasm_function.op
+      = cluster::incremental_update_operation::set;
 
     for (auto& cfg : resource.configs) {
         try {
@@ -121,6 +123,11 @@ create_topic_properties_update(alter_configs_resource& resource) {
             if (cfg.name == topic_property_retention_duration) {
                 parse_and_set_tristate(
                   update.properties.retention_duration, cfg.value);
+                continue;
+            }
+            if (cfg.name == topic_property_wasm_function) {
+                parse_and_set_optional(
+                  update.properties.wasm_function, cfg.value);
                 continue;
             }
         } catch (const boost::bad_lexical_cast& e) {

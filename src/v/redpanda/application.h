@@ -35,6 +35,9 @@
 #include "security/credential_store.h"
 #include "storage/compaction_controller.h"
 #include "storage/fwd.h"
+#include "v8_engine/environment.h"
+#include "v8_engine/executor.h"
+#include "v8_engine/wasm_scripts_table.h"
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/metrics_registration.hh>
@@ -76,6 +79,7 @@ public:
     ss::sharded<cluster::shard_table> shard_table;
     ss::sharded<storage::api> storage;
     ss::sharded<coproc::pacemaker> pacemaker;
+    ss::sharded<v8_engine::wasm_scripts_table<v8_engine::executor_wrapper>> wasm_table;
     ss::sharded<cluster::partition_manager> partition_manager;
     ss::sharded<raft::recovery_throttle> recovery_throttle;
     ss::sharded<raft::group_manager> raft_group_manager;
@@ -107,6 +111,11 @@ private:
         return cfg.developer_mode() && cfg.enable_coproc();
     }
 
+    bool v8_engine_enabled() {
+        const auto& cfg = config::shard_local_cfg();
+        return cfg.developer_mode() && cfg.enable_v8();
+    }
+
     bool archival_storage_enabled();
 
     template<typename Service, typename... Args>
@@ -133,6 +142,8 @@ private:
     ss::logger _log;
 
     std::unique_ptr<coproc::wasm::event_listener> _wasm_event_listener;
+    std::optional<v8_engine::enviroment> _v8_env;
+    std::unique_ptr<v8_engine::executor_wrapper> _executor;
     ss::sharded<rpc::connection_cache> _raft_connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
     ss::sharded<rpc::server> _rpc;

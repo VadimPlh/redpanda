@@ -93,6 +93,18 @@ configuration::configuration()
       "Interval for which all coprocessor offsets are flushed to disk",
       required::no,
       300000ms) // five minutes
+  , enable_v8(*this, "enable_v8", "Enable v8 engine", required::no, false)
+  , core_for_executor(
+      *this,
+      "core_for_executor",
+      "Set core for std::thread in executor",
+      required::no)
+  , max_executor_queue_size(
+      *this,
+      "max_executor_queue_size",
+      "Max queue size in executor with tasks",
+      required::no,
+      ss::smp::count)
   , node_id(
       *this,
       "node_id",

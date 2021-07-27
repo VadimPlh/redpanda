@@ -12,5 +12,6 @@ v_cc_library(
     v::rphashing
     v::reflection
     Seastar::seastar
+    v::json
   )
 add_subdirectory(tests)

@@ -93,6 +93,10 @@ bool metadata_cache::contains(
     return _topics_state.local().contains(tp, pid);
 }
 
+void metadata_cache::execute_wasm(const model::ntp ntp){
+    _topics_state.local().execute_wasm(ntp);
+}
+
 ss::future<model::node_id> metadata_cache::get_leader(
   const model::ntp& ntp,
   ss::lowres_clock::time_point tout,
