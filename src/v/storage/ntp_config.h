@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "model/data_policy.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "ssx/sformat.h"
@@ -31,6 +32,7 @@ public:
         std::optional<model::compaction_strategy> compaction_strategy;
         // if not set, use the log_manager's configuration
         std::optional<size_t> segment_size;
+        std::optional<model::data_policy> data_policy;
 
         // partition retention settings. If tristate is disabled the feature
         // will be disabled if there is no value set the default will be used

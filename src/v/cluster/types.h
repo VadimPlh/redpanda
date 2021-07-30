@@ -15,6 +15,7 @@
 #include "cluster/fwd.h"
 #include "kafka/types.h"
 #include "model/adl_serde.h"
+#include "model/data_policy.h"
 #include "model/fundamental.h"
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
@@ -312,8 +313,9 @@ struct topic_properties {
     std::optional<model::compaction_strategy> compaction_strategy;
     std::optional<model::timestamp_type> timestamp_type;
     std::optional<size_t> segment_size;
-    tristate<size_t> retention_bytes{std::nullopt};
-    tristate<std::chrono::milliseconds> retention_duration{std::nullopt};
+    std::optional<model::data_policy> data_policy;
+    tristate<size_t> retention_bytes;
+    tristate<std::chrono::milliseconds> retention_duration;
 
     bool is_compacted() const;
     bool has_overrides() const;
@@ -344,6 +346,7 @@ struct incremental_topic_updates {
       compaction_strategy;
     property_update<std::optional<model::timestamp_type>> timestamp_type;
     property_update<std::optional<size_t>> segment_size;
+    property_update<std::optional<model::data_policy>> data_policy;
     property_update<tristate<size_t>> retention_bytes;
     property_update<tristate<std::chrono::milliseconds>> retention_duration;
 };

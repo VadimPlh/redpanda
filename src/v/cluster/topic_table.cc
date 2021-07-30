@@ -252,11 +252,12 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     incremental_update(
       properties.compaction_strategy, overrides.compaction_strategy);
     incremental_update(properties.compression, overrides.compression);
-    incremental_update(properties.retention_bytes, overrides.retention_bytes);
+    incremental_update(properties.retention_bytes, overrides.retention_bytes); // TODO: update v8_scripts_dispatcher
     incremental_update(
       properties.retention_duration, overrides.retention_duration);
     incremental_update(properties.segment_size, overrides.segment_size);
     incremental_update(properties.timestamp_type, overrides.timestamp_type);
+    incremental_update(properties.data_policy, overrides.data_policy);
 
     // generate deltas for controller backend
     std::vector<topic_table_delta> deltas;

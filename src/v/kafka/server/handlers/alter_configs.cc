@@ -81,6 +81,8 @@ create_topic_properties_update(alter_configs_resource& resource) {
       = cluster::incremental_update_operation::set;
     update.properties.timestamp_type.op
       = cluster::incremental_update_operation::set;
+    update.properties.data_policy.op
+      = cluster::incremental_update_operation::set;
     update.properties.retention_bytes.op
       = cluster::incremental_update_operation::set;
     update.properties.retention_duration.op
@@ -111,6 +113,11 @@ create_topic_properties_update(alter_configs_resource& resource) {
             if (cfg.name == topic_property_timestamp_type) {
                 parse_and_set_optional(
                   update.properties.timestamp_type, cfg.value);
+                continue;
+            }
+            if (cfg.name == topic_property_data_policy) {
+                parse_and_set_optional(
+                  update.properties.data_policy, cfg.value);
                 continue;
             }
             if (cfg.name == topic_property_retention_bytes) {

@@ -37,8 +37,8 @@ bool topic_properties::is_compacted() const {
 
 bool topic_properties::has_overrides() const {
     return cleanup_policy_bitflags || compaction_strategy || segment_size
-           || retention_bytes.has_value() || retention_bytes.is_disabled()
-           || retention_duration.has_value()
+           || data_policy || retention_bytes.has_value()
+           || retention_bytes.is_disabled() || retention_duration.has_value()
            || retention_duration.is_disabled();
 }
 
@@ -50,6 +50,7 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.retention_bytes = retention_bytes;
     ret.retention_time = retention_duration;
     ret.segment_size = segment_size;
+    ret.data_policy = data_policy;
     return ret;
 }
 
@@ -72,6 +73,7 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .cleanup_policy_bitflags = properties.cleanup_policy_bitflags,
             .compaction_strategy = properties.compaction_strategy,
             .segment_size = properties.segment_size,
+            .data_policy = properties.data_policy,
             .retention_bytes = properties.retention_bytes,
             .retention_time = properties.retention_duration,
             // we disable cache for internal topics as they are read only once
@@ -162,13 +164,14 @@ std::ostream& operator<<(std::ostream& o, const topic_properties& properties) {
       o,
       "{{ compression: {}, cleanup_policy_bitflags: {}, compaction_strategy: "
       "{}, retention_bytes: {}, retention_duration_ms: {}, segment_size: {}, "
-      "timestamp_type: {} }}",
+      "data_policy: {}, timestamp_type: {} }}",
       properties.compression,
       properties.cleanup_policy_bitflags,
       properties.compaction_strategy,
       properties.retention_bytes,
       properties.retention_duration,
       properties.segment_size,
+      properties.data_policy,
       properties.timestamp_type);
 
     return o;
@@ -297,6 +300,7 @@ void adl<cluster::topic_configuration>::to(
       t.properties.compaction_strategy,
       t.properties.timestamp_type,
       t.properties.segment_size,
+      t.properties.data_policy,
       t.properties.retention_bytes,
       t.properties.retention_duration);
 }
@@ -320,6 +324,8 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
     cfg.properties.timestamp_type
       = adl<std::optional<model::timestamp_type>>{}.from(in);
     cfg.properties.segment_size = adl<std::optional<size_t>>{}.from(in);
+    cfg.properties.data_policy = adl<std::optional<model::data_policy>>{}.from(
+      in);
     cfg.properties.retention_bytes = adl<tristate<size_t>>{}.from(in);
     cfg.properties.retention_duration
       = adl<tristate<std::chrono::milliseconds>>{}.from(in);

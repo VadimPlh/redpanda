@@ -164,6 +164,11 @@ create_topic_properties_update(incremental_alter_configs_resource& resource) {
                   update.properties.timestamp_type, cfg.value, op);
                 continue;
             }
+            if (cfg.name == topic_property_data_policy) {
+                parse_and_set_optional(
+                  update.properties.data_policy, cfg.value, op);
+                continue;
+            }
             if (cfg.name == topic_property_retention_bytes) {
                 parse_and_set_tristate(
                   update.properties.retention_bytes, cfg.value, op);

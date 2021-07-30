@@ -87,6 +87,8 @@ cluster::topic_configuration to_cluster_type(const creatable_topic& t) {
       config_entries, topic_property_timestamp_type);
     cfg.properties.segment_size = get_config_value<size_t>(
       config_entries, topic_property_segment_size);
+    cfg.properties.data_policy = get_config_value<model::data_policy>(
+      config_entries, topic_property_data_policy);
     cfg.properties.compaction_strategy
       = get_config_value<model::compaction_strategy>(
         config_entries, topic_property_compaction_strategy);
