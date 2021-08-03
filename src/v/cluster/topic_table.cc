@@ -11,12 +11,16 @@
 
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
+#include "cluster/errc.h"
 #include "cluster/logger.h"
 #include "cluster/types.h"
+#include "config/configuration.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "v8_engine/executor.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/temporary_buffer.hh>
 
 namespace cluster {
 
@@ -236,6 +240,29 @@ void incremental_update(
     }
 }
 
+ss::future<> update_data_policy(
+  std::optional<model::data_policy> property,
+  property_update<std::optional<model::data_policy>> override,
+  const model::topic_namespace& topic,
+  v8_engine::scripts_table& dispatcher) {
+    switch (override.op) {
+    case incremental_update_operation::remove:
+        property = std::nullopt;
+        co_return co_await dispatcher.delete_script(topic);
+    case incremental_update_operation::set:
+        // set new value
+        property = override.value;
+        if (property.has_value()) {
+            co_return co_await dispatcher.update_script(
+              topic, property.value());
+        }
+        co_return;
+    case incremental_update_operation::none:
+        // do nothing
+        co_return;
+    }
+}
+
 ss::future<std::error_code>
 topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     auto tp = _topics.find(cmd.key);
@@ -252,12 +279,32 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     incremental_update(
       properties.compaction_strategy, overrides.compaction_strategy);
     incremental_update(properties.compression, overrides.compression);
-    incremental_update(properties.retention_bytes, overrides.retention_bytes); // TODO: update v8_scripts_dispatcher
+    incremental_update(properties.retention_bytes, overrides.retention_bytes);
     incremental_update(
       properties.retention_duration, overrides.retention_duration);
     incremental_update(properties.segment_size, overrides.segment_size);
     incremental_update(properties.timestamp_type, overrides.timestamp_type);
-    incremental_update(properties.data_policy, overrides.data_policy);
+
+    const auto& cfg = config::shard_local_cfg();
+    if (!(cfg.developer_mode() && cfg.enable_v8())) {
+        vlog(clusterlog.error, "v8_engine is disabled");
+        co_return make_error_code(errc::success); // Need to skip this update
+    }
+
+    try {
+        co_await update_data_policy(
+          properties.data_policy,
+          overrides.data_policy,
+          tp->first,
+          _v8_scripts_dispatcher.local());
+    } catch (std::runtime_error& ex) {
+        vlog(
+          clusterlog.error,
+          "Can not update datapolicy for topic {}. Error: {}",
+          tp->first,
+          ex.what());
+        co_return make_error_code(errc::success); // Need to skip this update
+    }
 
     // generate deltas for controller backend
     std::vector<topic_table_delta> deltas;

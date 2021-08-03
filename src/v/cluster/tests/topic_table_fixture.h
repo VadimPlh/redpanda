@@ -17,6 +17,7 @@
 #include "cluster/topic_table.h"
 #include "test_utils/fixture.h"
 #include "units.h"
+#include "v8_engine/scripts_dispatcher.h"
 
 static std::unique_ptr<cluster::allocation_node>
 create_allocation_node(model::node_id nid, uint32_t cores) {
@@ -42,7 +43,7 @@ static void validate_delta(
 
 struct topic_table_fixture {
     topic_table_fixture() {
-        table.start().get0();
+        table.start(std::ref(v8_scripts_dispatcher)).get0();
         allocator.start_single().get0();
         allocator.local().register_node(
           create_allocation_node(model::node_id(1), 8));
@@ -127,6 +128,8 @@ struct topic_table_fixture {
     }
 
     ss::sharded<cluster::partition_allocator> allocator;
+    ss::sharded<v8_engine::scripts_table>
+      v8_scripts_dispatcher; // TODO: add test for that + v8_engine things
     ss::sharded<cluster::topic_table> table;
     ss::abort_source as;
 };

@@ -45,11 +45,13 @@ controller::controller(
   ss::sharded<partition_manager>& pm,
   ss::sharded<shard_table>& st,
   ss::sharded<storage::api>& storage,
-  ss::sharded<raft::group_manager>& raft_manager)
+  ss::sharded<raft::group_manager>& raft_manager,
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher)
   : _connections(ccache)
   , _partition_manager(pm)
   , _shard_table(st)
   , _storage(storage)
+  , _v8_scripts_dispatcher(v8_scripts_dispatcher)
   , _tp_updates_dispatcher(_partition_allocator, _tp_state)
   , _security_manager(_credentials, _authorizer)
   , _raft_manager(raft_manager) {}
@@ -61,7 +63,8 @@ ss::future<> controller::wire_up() {
       .then([this] { return _partition_allocator.start_single(); })
       .then([this] { return _credentials.start(); })
       .then([this] { return _authorizer.start(); })
-      .then([this] { return _tp_state.start(); });
+      .then(
+        [this] { return _tp_state.start(std::ref(_v8_scripts_dispatcher)); });
 }
 
 ss::future<> controller::start() {

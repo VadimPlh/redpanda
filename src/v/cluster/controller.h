@@ -34,7 +34,8 @@ public:
       ss::sharded<partition_manager>& pm,
       ss::sharded<shard_table>& st,
       ss::sharded<storage::api>& storage,
-      ss::sharded<raft::group_manager>&);
+      ss::sharded<raft::group_manager>&,
+      ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher);
 
     model::node_id self() { return _raft0->self().id(); }
     ss::sharded<topics_frontend>& get_topics_frontend() { return _tp_frontend; }
@@ -90,6 +91,7 @@ private:
     ss::sharded<partition_manager>& _partition_manager;
     ss::sharded<shard_table>& _shard_table;
     ss::sharded<storage::api>& _storage;
+    ss::sharded<v8_engine::scripts_table>& _v8_scripts_dispatcher;
     topic_updates_dispatcher _tp_updates_dispatcher;
     ss::sharded<security::credential_store> _credentials;
     security_manager _security_manager;

@@ -15,6 +15,8 @@
 #include "cluster/types.h"
 #include "model/fundamental.h"
 #include "utils/expiring_promise.h"
+#include "v8_engine/executor.h"
+#include "v8_engine/scripts_dispatcher.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -33,6 +35,10 @@ namespace cluster {
 
 class topic_table {
 public:
+    explicit topic_table(
+      ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher)
+      : _v8_scripts_dispatcher(v8_scripts_dispatcher) {}
+
     using delta = topic_table_delta;
     struct topic_metadata {
         topic_configuration_assignment configuration;
@@ -158,5 +164,7 @@ private:
     std::vector<std::pair<cluster::notification_id_type, delta_cb_t>>
       _notifications;
     uint64_t _waiter_id{0};
+
+    ss::sharded<v8_engine::scripts_table>& _v8_scripts_dispatcher;
 };
 } // namespace cluster
