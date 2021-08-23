@@ -296,6 +296,10 @@ void topic_manifest::update(const rapidjson::Document& m) {
     if (!m["segment_size"].IsNull()) {
         conf.properties.segment_size = m["segment_size"].GetInt64();
     }
+    if (m.HasMember("data-policy") && !m["data-policy"].IsNull()) {
+        conf.properties.data_policy = boost::lexical_cast<model::data_policy>(
+          m["data-policy"].GetString());
+    }
     // tristate
     if (m.HasMember("retention_bytes")) {
         if (!m["retention_bytes"].IsNull()) {
@@ -382,6 +386,14 @@ void topic_manifest::serialize(std::ostream& out) const {
     w.Key("segment_size");
     if (_topic_config->properties.segment_size.has_value()) {
         w.Int64(*_topic_config->properties.segment_size);
+    } else {
+        w.Null();
+    }
+    w.Key("data-policy");
+    if (_topic_config->properties.data_policy.has_value()) {
+        ss::sstring value
+          = _topic_config->properties.data_policy.value().to_json();
+        w.String(boost::lexical_cast<std::string>(value));
     } else {
         w.Null();
     }
