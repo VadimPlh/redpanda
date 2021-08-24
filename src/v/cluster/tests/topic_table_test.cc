@@ -107,6 +107,10 @@ FIXTURE_TEST(get_getting_config, topic_table_fixture) {
     BOOST_REQUIRE_EQUAL(
       v.properties.retention_duration,
       tristate(std::make_optional(std::chrono::milliseconds(3600000))));
+    BOOST_REQUIRE_EQUAL(
+      v.properties.data_policy.value(),
+      model::data_policy(
+        R"({"function_name" : "foo1" , "script_name" : "foo2"})"));
 }
 
 FIXTURE_TEST(test_wait_aborted, topic_table_fixture) {

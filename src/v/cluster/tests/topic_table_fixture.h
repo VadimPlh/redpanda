@@ -100,6 +100,8 @@ struct topic_table_fixture {
           std::make_optional(2_GiB));
         cmd_1.value.cfg.properties.retention_duration = tristate(
           std::make_optional(std::chrono::milliseconds(3600000)));
+        cmd_1.value.cfg.properties.data_policy = model::data_policy(
+          R"({"function_name" : "foo1" , "script_name" : "foo2"})");
         auto cmd_2 = make_create_topic_cmd("test_tp_2", 12, 3);
         auto cmd_3 = make_create_topic_cmd("test_tp_3", 8, 1);
 

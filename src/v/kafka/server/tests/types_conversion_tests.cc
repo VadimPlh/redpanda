@@ -44,7 +44,8 @@ BOOST_AUTO_TEST_CASE(test_all_additional_options) {
         {"retention.bytes", "-1"},
         {"retention.ms", "86400000"},
         {"compaction.strategy", "header"},
-      }};
+        {"datapolicy",
+         R"({"function_name" : "foo1" , "script_name" : "foo2"})"}}};
 
     auto cluster_tp_config = to_cluster_type(all_options);
     BOOST_REQUIRE_EQUAL(
@@ -68,4 +69,8 @@ BOOST_AUTO_TEST_CASE(test_all_additional_options) {
       cluster_tp_config.properties.cleanup_policy_bitflags,
       model::cleanup_policy_bitflags::compaction
         | model::cleanup_policy_bitflags::deletion);
+    BOOST_REQUIRE_EQUAL(
+      cluster_tp_config.properties.data_policy.value(),
+      model::data_policy(
+        R"({"function_name" : "foo1" , "script_name" : "foo2"})"));
 }
