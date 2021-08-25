@@ -125,6 +125,7 @@ static error_code map_produce_error_code(std::error_code ec) {
     if (ec.category() == raft::error_category()) {
         switch (static_cast<raft::errc>(ec.value())) {
         case raft::errc::not_leader:
+        case raft::errc::replicated_entry_truncated:
             return error_code::not_leader_for_partition;
         default:
             return error_code::unknown_server_error;
@@ -239,6 +240,7 @@ static partition_produce_stages produce_topic_partition(
 
     auto dispatch = std::make_unique<ss::promise<>>();
     auto dispatch_f = dispatch->get_future();
+    auto m = octx.rctx.probe().auto_produce_measurement();
     auto f
       = octx.rctx.partition_manager()
           .invoke_on(
@@ -309,10 +311,13 @@ static partition_produce_stages produce_topic_partition(
                       return std::move(f);
                   });
             })
-          .then([&octx, start](produce_response::partition p) {
+          .then([&octx, start, m = std::move(m)](
+                  produce_response::partition p) {
               if (p.error_code == error_code::none) {
                   auto dur = std::chrono::steady_clock::now() - start;
                   octx.rctx.connection()->server().update_produce_latency(dur);
+              } else {
+                  m->set_trace(false);
               }
               return p;
           });
@@ -594,9 +599,25 @@ produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
                               octx.response)));
                       });
                 } catch (...) {
+                    /*
+                     * if the first stage failed then we cannot resolve the
+                     * current future (do_with holding octx) immediately,
+                     * otherwise octx will be destroyed and all of the second
+                     * stage futures (which have a reference to octx) will be
+                     * backgrounded. logging about the second stage return value
+                     * is handled in connection_context handler.
+                     */
                     dispatched_promise.set_exception(std::current_exception());
-                    return ss::make_exception_future<response_ptr>(
-                      std::current_exception());
+                    return when_all_succeed(produced.begin(), produced.end())
+                      .discard_result()
+                      .then([] {
+                          return ss::make_exception_future<response_ptr>(
+                            std::runtime_error("First stage produce failed but "
+                                               "second stage succeeded."));
+                      })
+                      .handle_exception([](std::exception_ptr e) {
+                          return ss::make_exception_future<response_ptr>(e);
+                      });
                 }
             });
       });

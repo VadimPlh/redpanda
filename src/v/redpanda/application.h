@@ -23,6 +23,7 @@
 #include "pandaproxy/rest/fwd.h"
 #include "pandaproxy/schema_registry/configuration.h"
 #include "pandaproxy/schema_registry/fwd.h"
+#include "pandaproxy/schema_registry/seq_writer.h"
 #include "pandaproxy/schema_registry/sharded_store.h"
 #include "raft/group_manager.h"
 #include "raft/recovery_throttle.h"
@@ -35,6 +36,9 @@
 #include "security/credential_store.h"
 #include "storage/compaction_controller.h"
 #include "storage/fwd.h"
+#include "v8_engine/environment.h"
+#include "v8_engine/executor.h"
+#include "v8_engine/scripts_dispatcher.h"
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/metrics_registration.hh>
@@ -91,6 +95,7 @@ public:
     ss::sharded<kafka::rm_group_frontend> rm_group_frontend;
     ss::sharded<cluster::rm_partition_frontend> rm_partition_frontend;
     ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
+    ss::sharded<v8_engine::scripts_table> v8_scripts_dispatcher;
 
 private:
     using deferred_actions
@@ -98,13 +103,18 @@ private:
 
     // All methods are calleds from Seastar thread
     void init_env();
-    ss::app_template setup_app_template();
+    ss::app_template::config setup_app_config();
     void validate_arguments(const po::variables_map&);
     void hydrate_config(const po::variables_map&);
 
     bool coproc_enabled() {
         const auto& cfg = config::shard_local_cfg();
         return cfg.developer_mode() && cfg.enable_coproc();
+    }
+
+    bool v8_enabled() {
+        const auto& cfg = config::shard_local_cfg();
+        return cfg.developer_mode() && cfg.enable_v8();
     }
 
     bool archival_storage_enabled();
@@ -132,7 +142,12 @@ private:
     scheduling_groups _scheduling_groups;
     ss::logger _log;
 
+    // coproc stuff
+    std::unique_ptr<coproc::wasm::async_event_handler> _async_handler;
+    std::unique_ptr<coproc::wasm::data_policy_event_handler>
+      _data_policy_handler;
     std::unique_ptr<coproc::wasm::event_listener> _wasm_event_listener;
+
     ss::sharded<rpc::connection_cache> _raft_connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
     ss::sharded<rpc::server> _rpc;
@@ -143,7 +158,12 @@ private:
     ss::sharded<kafka::client::client> _schema_registry_client;
     pandaproxy::schema_registry::sharded_store _schema_registry_store;
     ss::sharded<pandaproxy::schema_registry::service> _schema_registry;
+    ss::sharded<pandaproxy::schema_registry::seq_writer>
+      _schema_registry_sequencer;
     ss::sharded<storage::compaction_controller> _compaction_controller;
+
+    std::optional<v8_engine::enviroment> _v8_env;
+    std::unique_ptr<v8_engine::executor_wrapper> _executor;
 
     ss::metrics::metric_groups _metrics;
     kafka::rm_group_proxy_impl _rm_group_proxy;

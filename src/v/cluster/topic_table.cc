@@ -9,6 +9,7 @@
 
 #include "cluster/topic_table.h"
 
+#include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
 #include "cluster/logger.h"
 #include "cluster/types.h"
@@ -80,6 +81,30 @@ topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
     }
     return ss::make_ready_future<std::error_code>(errc::topic_not_exists);
 }
+ss::future<std::error_code>
+topic_table::apply(create_partition_cmd cmd, model::offset offset) {
+    auto tp = _topics.find(cmd.key);
+    if (tp == _topics.end()) {
+        co_return errc::topic_not_exists;
+    }
+
+    // add partitions
+    auto prev_partition_count = tp->second.configuration.cfg.partition_count;
+    tp->second.configuration.cfg.partition_count
+      += cmd.value.cfg.partition_count;
+    // add assignments
+    for (auto& p_as : cmd.value.assignments) {
+        p_as.id += model::partition_id(prev_partition_count);
+        tp->second.configuration.assignments.push_back(p_as);
+        // propagate deltas
+        auto ntp = model::ntp(cmd.key.ns, cmd.key.tp, p_as.id);
+        _pending_deltas.emplace_back(
+          std::move(ntp), std::move(p_as), offset, delta::op_type::add);
+    }
+
+    notify_waiters();
+    co_return errc::success;
+}
 
 ss::future<std::error_code>
 topic_table::apply(move_partition_replicas_cmd cmd, model::offset o) {
@@ -102,6 +127,13 @@ topic_table::apply(move_partition_replicas_cmd cmd, model::offset o) {
 
     if (_update_in_progress.contains(cmd.key)) {
         return ss::make_ready_future<std::error_code>(errc::update_in_progress);
+    }
+
+    // assignment is already up to date, this operation is NOP do not propagate
+    // delta
+
+    if (are_replica_sets_equal(current_assignment_it->replicas, cmd.value)) {
+        return ss::make_ready_future<std::error_code>(errc::success);
     }
 
     _update_in_progress.insert(cmd.key);
@@ -129,7 +161,7 @@ topic_table::apply(finish_moving_partition_replicas_cmd cmd, model::offset o) {
     if (tp == _topics.end()) {
         return ss::make_ready_future<std::error_code>(errc::topic_not_exists);
     }
-    _update_in_progress.erase(cmd.key);
+
     // calculate deleta for backend
     auto current_assignment_it = std::find_if(
       tp->second.configuration.assignments.begin(),
@@ -142,6 +174,14 @@ topic_table::apply(finish_moving_partition_replicas_cmd cmd, model::offset o) {
         return ss::make_ready_future<std::error_code>(
           errc::partition_not_exists);
     }
+
+    if (current_assignment_it->replicas != cmd.value) {
+        return ss::make_ready_future<std::error_code>(
+          errc::invalid_node_operation);
+    }
+
+    _update_in_progress.erase(cmd.key);
+
     partition_assignment delta_assignment{
       .group = current_assignment_it->group,
       .id = current_assignment_it->id,

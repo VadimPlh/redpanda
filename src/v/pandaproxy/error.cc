@@ -24,10 +24,14 @@ struct reply_error_category final : std::error_category {
         switch (static_cast<reply_error_code>(ev)) {
         case reply_error_code::not_acceptable:
             return "HTTP 406 Not Acceptable";
+        case reply_error_code::conflict:
+            return "HTTP 409 Conflict";
         case reply_error_code::unsupported_media_type:
             return "HTTP 415 Unsupported Media Type";
         case reply_error_code::unprocessable_entity:
             return "HTTP 422 Unprocesable Entity";
+        case reply_error_code::internal_server_error:
+            return "HTTP 500 Internal Server Error";
         case reply_error_code::kafka_bad_request:
             return "kafka_bad_request";
         case reply_error_code::kafka_authentication_error:
@@ -48,6 +52,8 @@ struct reply_error_category final : std::error_category {
             return "subject_version_soft_deleted";
         case reply_error_code::subject_version_not_deleted:
             return "subject_version_not_deleted";
+        case reply_error_code::write_collision:
+            return "write_collision";
         case reply_error_code::zookeeper_error:
             return "zookeeper_error";
         case reply_error_code::kafka_error:

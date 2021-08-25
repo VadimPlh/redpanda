@@ -18,6 +18,7 @@
 #include "rpc/connection_cache.h"
 #include "rpc/dns.h"
 #include "rpc/types.h"
+#include "cluster/controller_stm.h"
 
 #include <seastar/core/sharded.hh>
 
@@ -168,5 +169,54 @@ auto do_with_client_one_shot(
  */
 bool has_local_replicas(
   model::node_id, const std::vector<model::broker_shard>&);
+
+bool are_replica_sets_equal(
+  const std::vector<model::broker_shard>&,
+  const std::vector<model::broker_shard>&);
+
+template<typename Cmd>
+ss::future<std::error_code> replicate_and_wait(
+  ss::sharded<controller_stm>& stm, ss::sharded<ss::abort_source>& as, Cmd&& cmd, model::timeout_clock::time_point timeout) {
+    return stm.invoke_on(
+      controller_stm_shard,
+      [cmd = std::forward<Cmd>(cmd), &as = as, timeout](
+        controller_stm& stm) mutable {
+          return serialize_cmd(std::forward<Cmd>(cmd))
+            .then([&stm, timeout, &as](model::record_batch b) {
+                return stm.replicate_and_wait(
+                  std::move(b), timeout, as.local());
+            });
+      });
+}
+
+template<typename Cmd, typename Service, typename Func>
+ss::future<std::error_code> dispatch_updates_to_cores(
+  Cmd cmd, ss::sharded<Service>& service, Func& func) {
+    using ret_t = std::vector<std::error_code>;
+    return ss::do_with(
+      ret_t{}, [cmd = std::move(cmd), &service, &func](ret_t& ret) mutable {
+          ret.reserve(ss::smp::count);
+          return ss::parallel_for_each(
+                   boost::irange(0, (int)ss::smp::count),
+                   [&ret, cmd = std::move(cmd), &service, &func](int shard) mutable {
+                       return func(shard, cmd, service)
+                         .then([&ret](std::error_code r) { ret.push_back(r); });
+                   })
+            .then([&ret] { return std::move(ret); })
+            .then([](std::vector<std::error_code> results) mutable {
+                auto ret = results.front();
+                for (auto& r : results) {
+                    vassert(
+                      ret == r,
+                      "State inconsistency across shards detected, "
+                      "expected "
+                      "result: {}, have: {}",
+                      ret,
+                      r);
+                }
+                return ret;
+            });
+      });
+}
 
 } // namespace cluster

@@ -38,6 +38,7 @@ var errNodePortMissing = errors.New("the node port is missing from the service")
 const (
 	redpandaContainerName     = "redpanda"
 	configuratorContainerName = "redpanda-configurator"
+	rpkStatusContainerName    = "rpk-status"
 
 	userID  = 101
 	groupID = 101
@@ -63,21 +64,22 @@ type ConfiguratorSettings struct {
 // focusing on the management of redpanda cluster
 type StatefulSetResource struct {
 	k8sclient.Client
-	scheme                         *runtime.Scheme
-	pandaCluster                   *redpandav1alpha1.Cluster
-	serviceFQDN                    string
-	serviceName                    string
-	nodePortName                   types.NamespacedName
-	nodePortSvc                    corev1.Service
-	redpandaCertSecretKey          types.NamespacedName
-	internalClientCertSecretKey    types.NamespacedName
-	adminCertSecretKey             types.NamespacedName // TODO this is unused, can be removed
-	adminAPINodeCertSecretKey      types.NamespacedName
-	adminAPIClientCertSecretKey    types.NamespacedName // TODO this is unused, can be removed
-	pandaproxyAPINodeCertSecretKey types.NamespacedName
-	serviceAccountName             string
-	configuratorSettings           ConfiguratorSettings
-	logger                         logr.Logger
+	scheme                             *runtime.Scheme
+	pandaCluster                       *redpandav1alpha1.Cluster
+	serviceFQDN                        string
+	serviceName                        string
+	nodePortName                       types.NamespacedName
+	nodePortSvc                        corev1.Service
+	redpandaCertSecretKey              types.NamespacedName
+	internalClientCertSecretKey        types.NamespacedName
+	adminCertSecretKey                 types.NamespacedName // TODO this is unused, can be removed
+	adminAPINodeCertSecretKey          types.NamespacedName
+	adminAPIClientCertSecretKey        types.NamespacedName // TODO this is unused, can be removed
+	pandaproxyAPINodeCertSecretKey     types.NamespacedName
+	schemaRegistryAPINodeCertSecretKey types.NamespacedName
+	serviceAccountName                 string
+	configuratorSettings               ConfiguratorSettings
+	logger                             logr.Logger
 
 	LastObservedState *appsv1.StatefulSet
 }
@@ -96,6 +98,7 @@ func NewStatefulSet(
 	adminAPINodeCertSecretKey types.NamespacedName,
 	adminAPIClientCertSecretKey types.NamespacedName,
 	pandaproxyAPINodeCertSecretKey types.NamespacedName,
+	schemaRegistryAPINodeCertSecretKey types.NamespacedName,
 	serviceAccountName string,
 	configuratorSettings ConfiguratorSettings,
 	logger logr.Logger,
@@ -114,6 +117,7 @@ func NewStatefulSet(
 		adminAPINodeCertSecretKey,
 		adminAPIClientCertSecretKey,
 		pandaproxyAPINodeCertSecretKey,
+		schemaRegistryAPINodeCertSecretKey,
 		serviceAccountName,
 		configuratorSettings,
 		logger.WithValues("Kind", statefulSetKind()),
@@ -357,8 +361,9 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  redpandaContainerName,
-							Image: r.pandaCluster.FullImageName(),
+							Name:    redpandaContainerName,
+							Image:   r.pandaCluster.FullImageName(),
+							Command: []string{"/usr/bin/rpk"},
 							Args: append([]string{
 								"redpanda",
 								"start",
@@ -460,12 +465,47 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 		},
 	}
 
+	rpkStatusContainer := r.rpkStatusContainer()
+	if rpkStatusContainer != nil {
+		ss.Spec.Template.Spec.Containers = append(ss.Spec.Template.Spec.Containers, *rpkStatusContainer)
+	}
+
 	err := controllerutil.SetControllerReference(r.pandaCluster, ss, r.scheme)
 	if err != nil {
 		return nil, err
 	}
 
 	return ss, nil
+}
+func (r *StatefulSetResource) rpkStatusContainer() *corev1.Container {
+	if r.pandaCluster.Spec.Sidecars.RpkStatus == nil {
+		r.logger.Info("BUG! No resources found for rpk status - this should never happen with defaulting webhook enabled - please consider enabling the webhook")
+		r.pandaCluster.Spec.Sidecars.RpkStatus = &redpandav1alpha1.Sidecar{
+			Enabled:   true,
+			Resources: redpandav1alpha1.DefaultRpkStatusResources,
+		}
+	}
+	if !r.pandaCluster.Spec.Sidecars.RpkStatus.Enabled {
+		return nil
+	}
+	return &corev1.Container{
+		Name:    rpkStatusContainerName,
+		Image:   r.pandaCluster.FullImageName(),
+		Command: []string{"/usr/local/bin/rpk-status.sh"},
+		Env: []corev1.EnvVar{
+			{
+				Name:  "REDPANDA_ENVIRONMENT",
+				Value: "kubernetes",
+			},
+		},
+		Resources: *r.pandaCluster.Spec.Sidecars.RpkStatus.Resources,
+		VolumeMounts: append([]corev1.VolumeMount{
+			{
+				Name:      "config-dir",
+				MountPath: configDestinationDir,
+			},
+		}, r.secretVolumeMounts()...),
+	}
 }
 
 func prepareAdditionalArguments(
@@ -480,8 +520,6 @@ func prepareAdditionalArguments(
 	if developerMode {
 		args := []string{
 			"--overprovisioned",
-			// sometimes a little bit of memory is consumed by other processes than seastar
-			"--reserve-memory " + redpandav1alpha1.ReserveMemoryString,
 			"--kernel-page-cache=true",
 			"--default-log-level=debug",
 		}
@@ -494,7 +532,7 @@ func prepareAdditionalArguments(
 
 	args := []string{
 		"--default-log-level=info",
-		"--reserve-memory 0M",
+		"--reserve-memory=0M",
 	}
 
 	/*
@@ -557,9 +595,20 @@ func (r *StatefulSetResource) secretVolumeMounts() []corev1.VolumeMount {
 			MountPath: tlsPandaproxyDir,
 		})
 	}
+	if r.pandaCluster.Spec.Configuration.SchemaRegistry != nil &&
+		r.pandaCluster.Spec.Configuration.SchemaRegistry.TLS != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "tlsschemaregistrycert",
+			MountPath: tlsSchemaRegistryDir,
+		})
+	}
 	return mounts
 }
 
+// nolint:funlen // The controller should have more focused feature
+// oriented functions. E.g. each TLS volume could be managed by
+// one function along side with root certificate, issuer, certificate and
+// volumesMount in statefulset.
 func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 	var vols []corev1.Volume
 
@@ -656,6 +705,32 @@ func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 		})
 	}
 
+	if r.pandaCluster.Spec.Configuration.SchemaRegistry != nil &&
+		r.pandaCluster.Spec.Configuration.SchemaRegistry.TLS != nil {
+		vols = append(vols, corev1.Volume{
+			Name: "tlsschemaregistrycert",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.schemaRegistryAPINodeCertSecretKey.Name,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  corev1.TLSPrivateKeyKey,
+							Path: corev1.TLSPrivateKeyKey,
+						},
+						{
+							Key:  corev1.TLSCertKey,
+							Path: corev1.TLSCertKey,
+						},
+						{
+							Key:  cmetav1.TLSCAKey,
+							Path: cmetav1.TLSCAKey,
+						},
+					},
+				},
+			},
+		})
+	}
+
 	return vols
 }
 
@@ -705,8 +780,16 @@ func (r *StatefulSetResource) getPorts() []corev1.ContainerPort {
 		})
 	}
 
-	if r.pandaCluster.ExternalListener() != nil &&
-		len(r.nodePortSvc.Spec.Ports) > 0 {
+	if r.pandaCluster.Spec.Configuration.SchemaRegistry != nil &&
+		r.pandaCluster.Spec.Configuration.SchemaRegistry.External != nil &&
+		!r.pandaCluster.Spec.Configuration.SchemaRegistry.External.Enabled {
+		ports = append(ports, corev1.ContainerPort{
+			Name:          SchemaRegistryPortName,
+			ContainerPort: int32(r.pandaCluster.Spec.Configuration.SchemaRegistry.Port),
+		})
+	}
+
+	if len(r.nodePortSvc.Spec.Ports) > 0 {
 		for _, port := range r.nodePortSvc.Spec.Ports {
 			ports = append(ports, corev1.ContainerPort{
 				Name: port.Name,

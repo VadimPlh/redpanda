@@ -11,12 +11,13 @@ package acl
 
 import (
 	"crypto/tls"
-	"errors"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/api/admin"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/common"
 	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/ui"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
 )
 
 const (
@@ -26,7 +27,9 @@ const (
 	deleteUsernameFlag = "delete-username"
 )
 
-func NewUserCommand(tls func() (*tls.Config, error)) *cobra.Command {
+func NewUserCommand(
+	conf func() (*config.Config, error), tls func() (*tls.Config, error),
+) *cobra.Command {
 	var apiUrls []string
 
 	command := &cobra.Command{
@@ -36,13 +39,13 @@ func NewUserCommand(tls func() (*tls.Config, error)) *cobra.Command {
 	}
 	command.PersistentFlags().StringSliceVar(
 		&apiUrls,
-		"api-urls",
+		config.FlagAdminHosts2,
 		[]string{},
 		"The comma-separated list of Admin API addresses (<IP>:<port>)."+
 			" You must specify one for each node.",
 	)
 
-	adminApi := buildAdminAPI(&apiUrls, tls)
+	adminApi := buildAdminAPI(conf, &apiUrls, tls)
 
 	command.AddCommand(NewCreateUserCommand(adminApi))
 	command.AddCommand(NewDeleteUserCommand(adminApi))
@@ -50,9 +53,14 @@ func NewUserCommand(tls func() (*tls.Config, error)) *cobra.Command {
 	return command
 }
 
-func NewCreateUserCommand(
-	adminApi func() (admin.AdminAPI, error),
-) *cobra.Command {
+// UserAPI encapsulates functions needed for a user API.
+type UserAPI interface {
+	CreateUser(username, password string) error
+	DeleteUser(username string) error
+	ListUsers() ([]string, error)
+}
+
+func NewCreateUserCommand(adminApi func() (UserAPI, error)) *cobra.Command {
 	var (
 		newUser     string
 		newPassword string
@@ -95,12 +103,8 @@ func NewCreateUserCommand(
 	return command
 }
 
-func NewDeleteUserCommand(
-	adminApi func() (admin.AdminAPI, error),
-) *cobra.Command {
-	var (
-		username string
-	)
+func NewDeleteUserCommand(adminApi func() (UserAPI, error)) *cobra.Command {
+	var username string
 	command := &cobra.Command{
 		Use:          "delete",
 		Short:        "Delete users",
@@ -132,9 +136,7 @@ func NewDeleteUserCommand(
 	return command
 }
 
-func NewListUsersCommand(
-	adminApi func() (admin.AdminAPI, error),
-) *cobra.Command {
+func NewListUsersCommand(adminApi func() (UserAPI, error)) *cobra.Command {
 	command := &cobra.Command{
 		Use:          "list",
 		Aliases:      []string{"ls"},
@@ -177,17 +179,17 @@ func printUsernames(usernames []string) {
 }
 
 func buildAdminAPI(
-	apiUrls *[]string, tls func() (*tls.Config, error),
-) func() (admin.AdminAPI, error) {
-	return func() (admin.AdminAPI, error) {
-		if len(*apiUrls) == 0 {
-			return nil, errors.New("--api-urls is required")
-		}
+	conf func() (*config.Config, error),
+	apiUrls *[]string,
+	tls func() (*tls.Config, error),
+) func() (UserAPI, error) {
+	return func() (UserAPI, error) {
+		addrs := common.DeduceAdminApiAddrs(conf, apiUrls)
 		tlsConfig, err := tls()
 		if err != nil {
 			return nil, err
 		}
 
-		return admin.NewAdminAPI(*apiUrls, tlsConfig)
+		return admin.NewAdminAPI(addrs, tlsConfig)
 	}
 }

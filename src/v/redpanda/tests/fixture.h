@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "cluster/members_table.h"
 #include "cluster/metadata_cache.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
@@ -94,6 +95,7 @@ public:
           app.controller->get_security_frontend(),
           app.controller->get_api(),
           app.tx_gateway_frontend,
+          app.v8_scripts_dispatcher,
           std::nullopt);
     }
 
@@ -134,7 +136,7 @@ public:
                                 seed_servers = std::move(seed_servers),
                                 base_path]() mutable {
             auto& config = config::shard_local_cfg();
-            config.get("node_id").set_value(node_id());
+            config.get("node_id").set_value(node_id);
 
             config.get("rpc_server")
               .set_value(unresolved_address("127.0.0.1", rpc_port));
@@ -183,17 +185,21 @@ public:
         cfg.get("schema_registry_api")
           .set_value(std::vector<model::broker_endpoint>{model::broker_endpoint(
             unresolved_address("127.0.0.1", listen_port))});
+        cfg.get("schema_registry_replication_factor")
+          .set_value(std::make_optional<int16_t>(1));
         return to_yaml(cfg);
     }
 
     ss::future<> wait_for_controller_leadership() {
-        return app.controller->get_partition_leaders()
-          .local()
-          .wait_for_leader(
-            model::controller_ntp,
-            ss::lowres_clock::now() + std::chrono::seconds(10),
-            {})
-          .discard_result();
+        auto tout = ss::lowres_clock::now() + std::chrono::seconds(10);
+        auto id = co_await app.controller->get_partition_leaders()
+                    .local()
+                    .wait_for_leader(model::controller_ntp, tout, {});
+
+        co_await tests::cooperative_spin_wait_with_timeout(10s, [this, id] {
+            auto& members = app.controller->get_members_table();
+            return members.local().contains(id);
+        });
     }
 
     ss::future<kafka::client::transport> make_kafka_client() {

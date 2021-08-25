@@ -62,6 +62,7 @@ ss::future<> connection_context::process_one_request() {
                         "could not parse header from client: {}",
                         _rs.conn->addr);
                       _rs.probe().header_corrupted();
+                      _rs.probe().request_completed();
                       return ss::make_ready_future<>();
                   }
                   return dispatch_method_once(std::move(h.value()), s);
@@ -210,6 +211,7 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
     return throttle_request(hdr, size).then([this, hdr = std::move(hdr), size](
                                               session_resources sres) mutable {
         if (_rs.abort_requested()) {
+            _rs.probe().request_completed();
             // protect against shutdown behavior
             return ss::make_ready_future<>();
         }
@@ -254,12 +256,34 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
                * first stage processed in a foreground.
                */
               return res.dispatched
-                .then([this,
-                       f = std::move(res.response),
-                       seq,
-                       correlation,
-                       self,
-                       s = std::move(sres)]() mutable {
+                .then_wrapped([this,
+                               f = std::move(res.response),
+                               seq,
+                               correlation,
+                               self,
+                               s = std::move(sres)](ss::future<> d) mutable {
+                    /*
+                     * if the dispatch/first stage failed, then we need to
+                     * need to consume the second stage since it might be
+                     * an exceptional future. if we captured `f` in the
+                     * lambda but didn't use `then_wrapped` then the
+                     * lambda would be destroyed and an ignored
+                     * exceptional future would be caught by seastar.
+                     */
+                    if (d.failed()) {
+                        return f.discard_result()
+                          .handle_exception([](std::exception_ptr e) {
+                              vlog(
+                                klog.info,
+                                "Discarding second stage failure {}",
+                                e);
+                          })
+                          .finally([self, d = std::move(d)]() mutable {
+                              self->_rs.probe().service_error();
+                              self->_rs.probe().request_completed();
+                              return std::move(d);
+                          });
+                    }
                     /**
                      * second stage processed in background.
                      */
@@ -278,13 +302,19 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
                             klog.info,
                             "Detected error processing request: {}",
                             e);
+                          self->_rs.probe().service_error();
                           self->_rs.conn->shutdown_input();
                       })
-                      .finally([s = std::move(s), self] {});
+                      .finally([s = std::move(s), self] {
+                          self->_rs.probe().request_completed();
+                      });
+                    return d;
                 })
                 .handle_exception([self](std::exception_ptr e) {
-                    vlog(klog.info, "Detected error processing request: {}", e);
+                    vlog(
+                      klog.info, "Detected error dispatching request: {}", e);
                     self->_rs.conn->shutdown_input();
+                    self->_rs.probe().request_completed();
                 });
           });
     });
@@ -302,7 +332,6 @@ ss::future<> connection_context::process_next_response() {
 
         auto r = std::move(it->second);
         _responses.erase(it);
-        _rs.probe().request_completed();
 
         if (r->is_noop()) {
             return ss::make_ready_future<ss::stop_iteration>(

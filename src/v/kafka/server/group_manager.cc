@@ -68,6 +68,14 @@ ss::future<> group_manager::start() {
           attach_partition(std::move(p));
       });
 
+    _unmanage_notify_handle = _pm.local().register_unmanage_notification(
+      model::kafka_internal_namespace,
+      model::kafka_group_topic,
+      [this](model::partition_id p_id) {
+          detach_partition(model::ntp(
+            model::kafka_internal_namespace, model::kafka_group_topic, p_id));
+      });
+
     /*
      * subscribe to topic modification events. In particular, when a topic is
      * deleted, consumer group metadata associated with the affected partitions
@@ -84,6 +92,7 @@ ss::future<> group_manager::start() {
 
 ss::future<> group_manager::stop() {
     _pm.local().unregister_manage_notification(_manage_notify_handle);
+    _pm.local().unregister_unmanage_notification(_unmanage_notify_handle);
     _gm.local().unregister_leadership_notification(_leader_notify_handle);
     _topic_table.local().unregister_delta_notification(
       _topic_table_notify_handle);
@@ -93,6 +102,32 @@ ss::future<> group_manager::stop() {
     }
 
     return _gate.close();
+}
+
+void group_manager::detach_partition(const model::ntp& ntp) {
+    klog.debug("detaching group metadata partition {}", ntp);
+    std::vector<group_ptr> groups;
+    groups.reserve(_groups.size());
+    for (auto& group : _groups) {
+        groups.push_back(group.second);
+    }
+
+    for (auto& gr : groups) {
+        // skip if group is not managed by current NTP
+        if (gr->partition()->ntp() != ntp) {
+            continue;
+        }
+        auto it = _groups.find(gr->id());
+        if (it == _groups.end()) {
+            continue;
+        }
+
+        vlog(klog.trace, "Removed group {}", gr);
+        _groups.erase(it);
+        _groups.rehash(0);
+    }
+    _partitions.erase(ntp);
+    _partitions.rehash(0);
 }
 
 void group_manager::attach_partition(ss::lw_shared_ptr<cluster::partition> p) {
@@ -323,6 +358,7 @@ ss::future<> group_manager::recover_partition(
         if (!group) {
             group = ss::make_lw_shared<kafka::group>(
               group_id, group_state::empty, _conf, p->partition);
+            group->reset_tx_state(term);
             _groups.emplace(group_id, group);
         }
         for (const auto& [_, tx] : group_stm.prepared_txs()) {
@@ -586,6 +622,7 @@ group_manager::join_group(join_group_request&& r) {
         auto p = it->second->partition;
         group = ss::make_lw_shared<kafka::group>(
           r.data.group_id, group_state::empty, _conf, p);
+        group->reset_tx_state(it->second->term);
         _groups.emplace(r.data.group_id, group);
         _groups.rehash(0);
         is_new_group = true;
@@ -709,6 +746,7 @@ group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
 
               group = ss::make_lw_shared<kafka::group>(
                 r.data.group_id, group_state::empty, _conf, p->partition);
+              group->reset_tx_state(p->term);
               _groups.emplace(r.data.group_id, group);
               _groups.rehash(0);
           }
@@ -877,9 +915,10 @@ group_manager::offset_commit(offset_commit_request&& r) {
         if (r.data.generation_id < 0) {
             // <kafka>the group is not relying on Kafka for group management, so
             // allow the commit</kafka>
-            auto p = _partitions.find(r.ntp)->second->partition;
+            auto p = _partitions.find(r.ntp)->second;
             group = ss::make_lw_shared<kafka::group>(
-              r.data.group_id, group_state::empty, _conf, p);
+              r.data.group_id, group_state::empty, _conf, p->partition);
+            group->reset_tx_state(p->term);
             _groups.emplace(r.data.group_id, group);
             _groups.rehash(0);
         } else {

@@ -9,7 +9,13 @@
 
 package config
 
-import "path"
+import (
+	"crypto/tls"
+	"path"
+
+	"github.com/spf13/afero"
+	"github.com/twmb/tlscfg"
+)
 
 type Config struct {
 	NodeUuid             string                 `yaml:"node_uuid,omitempty" mapstructure:"node_uuid,omitempty" json:"nodeUuid"`
@@ -64,8 +70,9 @@ type Pandaproxy struct {
 }
 
 type SchemaRegistry struct {
-	SchemaRegistryAPI    []NamedSocketAddress `yaml:"schema_registry_api,omitempty" mapstructure:"schema_registry_api,omitempty" json:"schemaRegistryApi,omitempty"`
-	SchemaRegistryAPITLS []ServerTLS          `yaml:"schema_registry_api_tls,omitempty" mapstructure:"schema_registry_api_tls,omitempty" json:"schemaRegistryApiTls,omitempty"`
+	SchemaRegistryAPI               []NamedSocketAddress `yaml:"schema_registry_api,omitempty" mapstructure:"schema_registry_api,omitempty" json:"schemaRegistryApi,omitempty"`
+	SchemaRegistryAPITLS            []ServerTLS          `yaml:"schema_registry_api_tls,omitempty" mapstructure:"schema_registry_api_tls,omitempty" json:"schemaRegistryApiTls,omitempty"`
+	SchemaRegistryReplicationFactor *int                 `yaml:"schema_registry_replication_factor,omitempty" mapstructure:"schema_registry_replication_factor,omitempty" json:"schemaRegistryReplicationFactor,omitempty"`
 }
 
 type KafkaClient struct {
@@ -95,6 +102,27 @@ type TLS struct {
 	KeyFile        string `yaml:"key_file,omitempty" mapstructure:"key_file,omitempty" json:"keyFile"`
 	CertFile       string `yaml:"cert_file,omitempty" mapstructure:"cert_file,omitempty" json:"certFile"`
 	TruststoreFile string `yaml:"truststore_file,omitempty" mapstructure:"truststore_file,omitempty" json:"truststoreFile"`
+}
+
+func (t *TLS) Config(fs afero.Fs) (*tls.Config, error) {
+	if t == nil {
+		return nil, nil
+	}
+	return tlscfg.New(
+		tlscfg.WithFS(
+			tlscfg.FuncFS(func(path string) ([]byte, error) {
+				return afero.ReadFile(fs, path)
+			}),
+		),
+		tlscfg.MaybeWithDiskCA(
+			t.TruststoreFile,
+			tlscfg.ForClient,
+		),
+		tlscfg.MaybeWithDiskKeyPair(
+			t.CertFile,
+			t.KeyFile,
+		),
+	)
 }
 
 type ServerTLS struct {
@@ -142,8 +170,8 @@ type RpkKafkaApi struct {
 }
 
 type RpkAdminApi struct {
-	Addresses []SocketAddress `yaml:"addresses,omitempty" mapstructure:"addresses,omitempty" json:"addresses"`
-	TLS       *TLS            `yaml:"tls,omitempty" mapstructure:"tls,omitempty" json:"tls"`
+	Addresses []string `yaml:"addresses,omitempty" mapstructure:"addresses,omitempty" json:"addresses"`
+	TLS       *TLS     `yaml:"tls,omitempty" mapstructure:"tls,omitempty" json:"tls"`
 }
 
 type SASL struct {

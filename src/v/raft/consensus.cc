@@ -20,6 +20,7 @@
 #include "raft/logger.h"
 #include "raft/prevote_stm.h"
 #include "raft/recovery_stm.h"
+#include "raft/replicate_entries_stm.h"
 #include "raft/rpc_client_protocol.h"
 #include "raft/types.h"
 #include "raft/vote_stm.h"
@@ -38,6 +39,7 @@
 #include <iterator>
 
 namespace raft {
+
 consensus::consensus(
   model::node_id nid,
   group_id group,
@@ -66,6 +68,8 @@ consensus::consensus(
       config::shard_local_cfg().replicate_append_timeout_ms())
   , _recovery_append_timeout(
       config::shard_local_cfg().recovery_append_timeout_ms())
+  , _heartbeat_disconnect_failures(
+      config::shard_local_cfg().raft_heartbeat_disconnect_failures())
   , _storage(storage)
   , _recovery_throttle(recovery_throttle)
   , _snapshot_mgr(
@@ -153,8 +157,8 @@ ss::future<> consensus::stop() {
 
     return _event_manager.stop()
       .then([this] { return _append_requests_buffer.stop(); })
-      .then([this] { return _bg.close(); })
       .then([this] { return _batcher.stop(); })
+      .then([this] { return _bg.close(); })
       .then([this] {
           // close writer if we have to
           if (likely(!_snapshot_writer)) {
@@ -232,7 +236,7 @@ consensus::success_reply consensus::update_follower_index(
       && reply.last_dirty_log_index < _log.offsets().dirty_offset) {
         vlog(
           _ctxlog.trace,
-          "ignorring reordered reply {} from node {} - last: {} current: {} ",
+          "ignoring reordered reply {} from node {} - last: {} current: {} ",
           reply,
           reply.node_id,
           idx.last_received_seq,
@@ -263,7 +267,7 @@ consensus::success_reply consensus::update_follower_index(
 
     // check preconditions for processing the reply
     if (!is_leader()) {
-        vlog(_ctxlog.debug, "ignorring append entries reply, not leader");
+        vlog(_ctxlog.debug, "ignoring append entries reply, not leader");
         return success_reply::no;
     }
     // If RPC request or response contains term T > currentTerm:
@@ -387,7 +391,7 @@ void consensus::successfull_append_entries_reply(
     idx.next_index = details::next_offset(idx.last_dirty_log_index);
     vlog(
       _ctxlog.trace,
-      "Updated node {} match {} and next {} indicies",
+      "Updated node {} match {} and next {} indices",
       idx.node_id,
       idx.match_index,
       idx.next_index);
@@ -670,17 +674,19 @@ consensus::do_make_reader(storage::log_reader_config config) {
 ss::future<model::record_batch_reader> consensus::make_reader(
   storage::log_reader_config config,
   std::optional<clock_type::time_point> debounce_timeout) {
-    if (!debounce_timeout) {
-        // fast path, do not wait
-        return do_make_reader(config);
-    }
+    return ss::try_with_gate(_bg, [this, config, debounce_timeout] {
+        if (!debounce_timeout) {
+            // fast path, do not wait
+            return do_make_reader(config);
+        }
 
-    return _consumable_offset_monitor
-      .wait(
-        details::next_offset(_majority_replicated_index),
-        *debounce_timeout,
-        _as)
-      .then([this, config]() mutable { return do_make_reader(config); });
+        return _consumable_offset_monitor
+          .wait(
+            details::next_offset(_majority_replicated_index),
+            *debounce_timeout,
+            _as)
+          .then([this, config]() mutable { return do_make_reader(config); });
+    });
 }
 
 bool consensus::should_skip_vote(bool ignore_heartbeat) {
@@ -1241,7 +1247,7 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
     if (n_priority < _target_priority && !r.leadership_transfer) {
         vlog(
           _ctxlog.info,
-          "not grainting vote to node {}, it has priority {} which is lower "
+          "not granting vote to node {}, it has priority {} which is lower "
           "than current target priority {}",
           r.node_id,
           n_priority,
@@ -1425,7 +1431,7 @@ consensus::do_append_entries(append_entries_request&& r) {
       && r.meta.prev_log_term != last_log_term) {
         vlog(
           _ctxlog.debug,
-          "Rejecting append entries. missmatching entry term at offset: "
+          "Rejecting append entries. mismatching entry term at offset: "
           "{}, current term: {} request term: {}",
           r.meta.prev_log_index,
           last_log_term,
@@ -1813,15 +1819,46 @@ ss::future<std::error_code> consensus::replicate_configuration(
             meta(),
             model::make_memory_record_batch_reader(std::move(batches)));
           /**
-           * We use replicate_batcher::do_flush directly as we already hold the
+           * We use dispatch_replicate directly as we already hold the
            * _op_lock mutex when replicating configuration
            */
           std::vector<ss::semaphore_units<>> units;
           units.push_back(std::move(u));
-          return _batcher
-            .do_flush({}, std::move(req), std::move(units), std::move(seqs))
-            .then([] { return std::error_code(errc::success); });
+          return dispatch_replicate(
+                   std::move(req), std::move(units), std::move(seqs))
+            .then([](result<replicate_result> res) {
+                if (res) {
+                    return make_error_code(errc::success);
+                }
+                return res.error();
+            });
       });
+}
+
+ss::future<result<replicate_result>> consensus::dispatch_replicate(
+  append_entries_request req,
+  std::vector<ss::semaphore_units<>> u,
+  absl::flat_hash_map<vnode, follower_req_seq> seqs) {
+    auto stm = ss::make_lw_shared<replicate_entries_stm>(
+      this, std::move(req), std::move(seqs));
+
+    return stm->apply(std::move(u)).finally([this, stm] {
+        auto f = stm->wait().finally([stm] {});
+        // if gate is closed wait for all futures
+        if (_bg.is_closed()) {
+            _ctxlog.info("gate-closed, waiting to finish background requests");
+            return f;
+        }
+        // background
+        (void)with_gate(_bg, [this, stm, f = std::move(f)]() mutable {
+            return std::move(f).handle_exception(
+              [this](const std::exception_ptr& e) {
+                  _ctxlog.error(
+                    "Error waiting for background acks to finish - {}", e);
+              });
+        });
+        return ss::now();
+    });
 }
 
 append_entries_reply consensus::make_append_entries_reply(
@@ -1942,6 +1979,21 @@ consensus::next_followers_request_seq() {
         ret.emplace(node_id, next_follower_sequence(node_id));
     }
     return ret;
+}
+
+ss::future<> consensus::refresh_commit_index() {
+    return _op_lock.get_units().then([this](ss::semaphore_units<> u) mutable {
+        if (!is_leader()) {
+            return ss::now();
+        }
+        auto f = ss::now();
+        if (_has_pending_flushes) {
+            f = flush_log();
+        }
+        return f.then([this, u = std::move(u)]() mutable {
+            return do_maybe_update_leader_commit_idx(std::move(u));
+        });
+    });
 }
 
 void consensus::maybe_update_leader_commit_idx() {
@@ -2115,19 +2167,6 @@ group_configuration consensus::config() const {
     return _configuration_manager.get_latest();
 }
 
-static std::ostream&
-operator<<(std::ostream& os, const consensus::vote_state& state) {
-    switch (state) {
-    case consensus::vote_state::leader:
-        return os << "{leader}";
-    case consensus::vote_state::follower:
-        return os << "{follower}";
-    case consensus::vote_state::candidate:
-        return os << "{candidate}";
-    }
-    std::terminate(); // make gcc happy
-}
-
 ss::future<timeout_now_reply> consensus::timeout_now(timeout_now_request&& r) {
     if (unlikely(is_request_target_node_invalid("timeout_now", r))) {
         return ss::make_ready_future<timeout_now_reply>(timeout_now_reply{
@@ -2193,10 +2232,33 @@ ss::future<timeout_now_reply> consensus::timeout_now(timeout_now_request&& r) {
     });
 }
 
+ss::future<transfer_leadership_reply>
+consensus::transfer_leadership(transfer_leadership_request req) {
+    transfer_leadership_reply reply;
+    auto err = co_await do_transfer_leadership(req.target);
+    if (err) {
+        vlog(
+          _ctxlog.warn,
+          "Unable to transfer leadership to {}: {}",
+          req.target,
+          err.message());
+
+        reply.success = false;
+        if (err.category() == raft::error_category()) {
+            reply.result = static_cast<errc>(err.value());
+        }
+        co_return reply;
+    }
+
+    reply.success = true;
+    reply.result = errc::success;
+    co_return reply;
+}
+
 ss::future<std::error_code>
-consensus::transfer_leadership(std::optional<model::node_id> target) {
+consensus::do_transfer_leadership(std::optional<model::node_id> target) {
     if (!is_leader()) {
-        vlog(_ctxlog.debug, "Cannot transfer leadership from non-leader");
+        vlog(_ctxlog.warn, "Cannot transfer leadership from non-leader");
         return seastar::make_ready_future<std::error_code>(
           make_error_code(errc::not_leader));
     }
@@ -2211,7 +2273,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
 
         if (unlikely(it == _fstats.end())) {
             vlog(
-              _ctxlog.debug,
+              _ctxlog.warn,
               "Cannot transfer leadership. No suitable target node found");
             return seastar::make_ready_future<std::error_code>(
               make_error_code(errc::node_does_not_exists));
@@ -2221,14 +2283,14 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
     }
 
     if (*target == _self.id()) {
-        vlog(_ctxlog.debug, "Cannot transfer leadership to self");
+        vlog(_ctxlog.warn, "Cannot transfer leadership to self");
         return seastar::make_ready_future<std::error_code>(
           make_error_code(errc::not_leader));
     }
 
     if (_configuration_manager.get_latest_offset() > _commit_index) {
         vlog(
-          _ctxlog.debug,
+          _ctxlog.warn,
           "Cannot transfer leadership during configuration change");
         return ss::make_ready_future<std::error_code>(
           make_error_code(errc::configuration_change_in_progress));
@@ -2238,7 +2300,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
 
     if (!target_rni) {
         vlog(
-          _ctxlog.debug,
+          _ctxlog.warn,
           "Cannot transfer leadership to node {} not found in configuration",
           *target);
         return seastar::make_ready_future<std::error_code>(
@@ -2247,7 +2309,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
 
     if (!conf.is_voter(*target_rni)) {
         vlog(
-          _ctxlog.debug,
+          _ctxlog.warn,
           "Cannot transfer leadership to node {} which is a learner",
           *target_rni);
         return seastar::make_ready_future<std::error_code>(
@@ -2256,7 +2318,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
 
     vlog(
       _ctxlog.info,
-      "Transferring leadership from {} to {} in term {}",
+      "Starting leadership transfer from {} to {} in term {}",
       _self,
       *target_rni,
       _term);
@@ -2264,7 +2326,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
     auto f = ss::with_gate(_bg, [this, target_rni = *target_rni] {
         if (_transferring_leadership) {
             vlog(
-              _ctxlog.info,
+              _ctxlog.warn,
               "Cannot transfer leadership. Transfer already in "
               "progress.");
             return seastar::make_ready_future<std::error_code>(
@@ -2310,7 +2372,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
         auto f = ss::now();
         if (meta.is_recovering) {
             vlog(
-              _ctxlog.info,
+              _ctxlog.warn,
               "Waiting on node to recover before requesting election");
             auto timeout = ss::semaphore::clock::duration(
               config::shard_local_cfg()
@@ -2330,7 +2392,7 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
              */
             if (!is_leader()) {
                 vlog(
-                  _ctxlog.debug, "Cannot transfer leadership from non-leader");
+                  _ctxlog.warn, "Cannot transfer leadership from non-leader");
                 return seastar::make_ready_future<std::error_code>(
                   make_error_code(errc::not_leader));
             }
@@ -2430,10 +2492,53 @@ heartbeats_suppressed consensus::are_heartbeats_suppressed(vnode id) const {
 void consensus::update_suppress_heartbeats(
   vnode id, follower_req_seq last_seq, heartbeats_suppressed suppressed) {
     if (auto it = _fstats.find(id); it != _fstats.end()) {
-        if (last_seq <= it->second.last_sent_seq) {
+        /**
+         * Since there may be concurrent sources causing heartbeats suppression
+         * we use last_suppress_heartbeats_seq to control concurrency of
+         * heartbeats state update
+         */
+        if (last_seq >= it->second.last_suppress_heartbeats_seq) {
+            it->second.last_suppress_heartbeats_seq = last_seq;
             it->second.suppress_heartbeats = suppressed;
         }
     }
+}
+
+void consensus::update_heartbeat_status(vnode id, bool success) {
+    if (auto it = _fstats.find(id); it != _fstats.end()) {
+        if (success) {
+            it->second.heartbeats_failed = 0;
+        } else {
+            it->second.heartbeats_failed++;
+        }
+    }
+}
+
+bool consensus::should_reconnect_follower(vnode id) {
+    if (_heartbeat_disconnect_failures == 0) {
+        // Force disconnection is disabled
+        return false;
+    }
+
+    if (auto it = _fstats.find(id); it != _fstats.end()) {
+        auto last_at = it->second.last_hbeat_timestamp;
+        const auto fail_count = it->second.heartbeats_failed;
+
+        auto is_live = last_at + _jit.base_duration() > clock_type::now();
+        auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       clock_type::now() - last_at)
+                       .count();
+        vlog(
+          _ctxlog.trace,
+          "should_reconnect_follower({}): {}/{} fails, last ok {}ms ago",
+          id,
+          fail_count,
+          _heartbeat_disconnect_failures,
+          since);
+        return fail_count > _heartbeat_disconnect_failures && !is_live;
+    }
+
+    return false;
 }
 
 voter_priority consensus::next_target_priority() {

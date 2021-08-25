@@ -136,12 +136,11 @@ void admin_server::configure_admin_routes() {
 
 void admin_server::configure_dashboard() {
     if (_cfg.dashboard_dir) {
-        _dashboard_handler = std::make_unique<dashboard_handler>(
-          *_cfg.dashboard_dir);
+        auto handler = std::make_unique<dashboard_handler>(*_cfg.dashboard_dir);
         _server._routes.add(
           ss::httpd::operation_type::GET,
           ss::httpd::url("/dashboard").remainder("path"),
-          _dashboard_handler.get());
+          handler.release());
     }
 }
 
@@ -348,7 +347,7 @@ void admin_server::register_raft_routes() {
                 if (!consensus) {
                     throw ss::httpd::not_found_exception();
                 }
-                return consensus->transfer_leadership(target).then(
+                return consensus->do_transfer_leadership(target).then(
                   [](std::error_code err) {
                       if (err) {
                           throw ss::httpd::server_error_exception(fmt::format(
@@ -568,7 +567,7 @@ void map_broker_state_update_error(model::node_id id, std::error_code ec) {
         case cluster::errc::node_does_not_exists:
             throw ss::httpd::not_found_exception(
               fmt::format("broker with id {} not found", id));
-        case cluster::errc::invalid_node_opeartion:
+        case cluster::errc::invalid_node_operation:
             throw ss::httpd::bad_request_exception(fmt::format(
               "can not update broker {} state, ivalid state transition "
               "requested",
@@ -601,6 +600,8 @@ void admin_server::register_broker_routes() {
               auto& b = res.emplace_back();
               b.node_id = broker->id();
               b.num_cores = broker->properties().cores;
+              b.membership_status = fmt::format(
+                "{}", broker->get_membership_state());
           }
           return ss::make_ready_future<ss::json::json_return_type>(
             std::move(res));

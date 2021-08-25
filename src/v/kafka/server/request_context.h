@@ -21,6 +21,7 @@
 #include "kafka/server/response.h"
 #include "kafka/types.h"
 #include "seastarx.h"
+#include "v8_engine/scripts_dispatcher.h"
 #include "vlog.h"
 
 #include <seastar/core/future.hh>
@@ -81,6 +82,8 @@ public:
     ss::lw_shared_ptr<connection_context> connection() { return _conn; }
 
     request_reader& reader() { return _reader; }
+
+    latency_probe& probe() { return _conn->server().probe(); }
 
     const cluster::metadata_cache& metadata_cache() const {
         return _conn->server().metadata_cache();
@@ -174,6 +177,10 @@ public:
 
     cluster::controller_api& controller_api() {
         return _conn->server().controller_api();
+    }
+
+    ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher() {
+        return _conn->server().v8_scripts_dispatcher();
     }
 
 private:

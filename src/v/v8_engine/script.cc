@@ -10,7 +10,9 @@
 
 #include "v8_engine/script.h"
 
+#include "model/record.h"
 #include "utils/file_io.h"
+#include "v8_engine/record_batch_wrapper.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -43,7 +45,7 @@ script::~script() {
     _context.Reset();
 }
 
-void script::compile_script(ss::temporary_buffer<char> js_code) {
+void script::compile_script(iobuf js_code) {
     v8::Locker locker(_isolate.get());
     v8::Isolate::Scope isolate_scope(_isolate.get());
     v8::HandleScope handle_scope(_isolate.get());
@@ -51,12 +53,12 @@ void script::compile_script(ss::temporary_buffer<char> js_code) {
     v8::Local<v8::Context> local_ctx = v8::Context::New(_isolate.get());
     v8::Context::Scope context_scope(local_ctx);
 
-    v8::Local<v8::String> script_code = v8::String::NewFromUtf8(
-                                          _isolate.get(),
-                                          js_code.begin(),
-                                          v8::NewStringType::kNormal,
-                                          js_code.size())
-                                          .ToLocalChecked();
+    auto code = iobuf_const_parser(js_code).read_string(js_code.size_bytes());
+
+    v8::Local<v8::String> script_code
+      = v8::String::NewFromUtf8(
+          _isolate.get(), code.c_str(), v8::NewStringType::kNormal, code.size())
+          .ToLocalChecked();
     v8::Local<v8::Script> compiled_script;
     if (!v8::Script::Compile(local_ctx, script_code)
            .ToLocal(&compiled_script)) {
@@ -99,7 +101,7 @@ void script::set_function(std::string_view name) {
     _function.Reset(_isolate.get(), function_val.As<v8::Function>());
 }
 
-void script::run_internal(ss::temporary_buffer<char> data) {
+void script::run_internal(model::record_batch& raw_batch) {
     v8::Locker locker(_isolate.get());
     v8::Isolate::Scope isolate_scope(_isolate.get());
     v8::HandleScope handle_scope(_isolate.get());
@@ -109,11 +111,25 @@ void script::run_internal(ss::temporary_buffer<char> data) {
     v8::Context::Scope context_scope(local_ctx);
 
     const int argc = 1;
-    auto store = v8::ArrayBuffer::NewBackingStore(
-      data.get_write(), data.size(), v8::BackingStore::EmptyDeleter, nullptr);
-    auto data_array_buf = v8::ArrayBuffer::New(
-      _isolate.get(), std::move(store));
-    v8::Local<v8::Value> argv[argc] = {data_array_buf};
+
+    v8::Local<v8::ObjectTemplate> obj_templ = v8::ObjectTemplate::New(
+      _isolate.get());
+    obj_templ->SetInternalFieldCount(1);
+
+    obj_templ->Set(
+      v8::String::NewFromUtf8(_isolate.get(), "consume").ToLocalChecked(),
+      v8::FunctionTemplate::New(_isolate.get(), record_batch_wrapper::consume));
+    obj_templ->Set(
+      v8::String::NewFromUtf8(_isolate.get(), "produce").ToLocalChecked(),
+      v8::FunctionTemplate::New(_isolate.get(), record_batch_wrapper::produce));
+
+    record_batch_wrapper batch(raw_batch);
+
+    v8::Local<v8::Object> obj
+      = obj_templ->NewInstance(local_ctx).ToLocalChecked();
+    obj->SetInternalField(0, v8::External::New(_isolate.get(), &batch));
+
+    v8::Local<v8::Value> argv[argc] = {obj};
     v8::Local<v8::Value> result;
 
     v8::Local<v8::Function> local_function = v8::Local<v8::Function>::New(
@@ -127,6 +143,8 @@ void script::run_internal(ss::temporary_buffer<char> data) {
             throw_exception_from_v8(try_catch, "Can not run function");
         }
     }
+
+    raw_batch = batch.get_output_batch();
 }
 
 void script::throw_exception_from_v8(std::string_view msg) {

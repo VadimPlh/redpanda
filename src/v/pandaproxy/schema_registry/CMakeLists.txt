@@ -12,7 +12,9 @@ v_cc_library(
     configuration.cc
     handlers.cc
     error.cc
+    schema_util.cc
     service.cc
+    seq_writer.cc
     sharded_store.cc
     avro.cc
   DEPS

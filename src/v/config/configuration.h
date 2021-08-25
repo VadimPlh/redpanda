@@ -48,6 +48,7 @@ struct configuration final : public config_store {
     // Network
     property<unresolved_address> rpc_server;
     property<tls_config> rpc_server_tls;
+    property<std::optional<int>> rpc_server_listen_backlog;
     // Coproc
     property<bool> enable_coproc;
     property<unresolved_address> coproc_supervisor_server;
@@ -55,12 +56,17 @@ struct configuration final : public config_store {
     property<std::size_t> coproc_max_ingest_bytes;
     property<std::size_t> coproc_max_batch_size;
     property<std::chrono::milliseconds> coproc_offset_flush_interval_ms;
+    // Inline wasm
+    property<bool> enable_v8;
+    property<uint8_t> core_for_executor;
+    property<uint64_t> max_executor_queue_size;
 
     // Raft
-    property<int32_t> node_id;
+    property<model::node_id> node_id;
     property<int32_t> seed_server_meta_topic_partitions;
     property<std::chrono::milliseconds> raft_heartbeat_interval_ms;
     property<std::chrono::milliseconds> raft_heartbeat_timeout_ms;
+    property<size_t> raft_heartbeat_disconnect_failures;
     property<std::vector<seed_server>> seed_servers;
     property<int16_t> min_version;
     property<int16_t> max_version;
@@ -87,7 +93,6 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> metadata_dissemination_interval_ms;
     property<std::chrono::milliseconds> metadata_dissemination_retry_delay_ms;
     property<int16_t> metadata_dissemination_retries;
-    property<model::violation_recovery_policy> stm_snapshot_recovery_policy;
     property<std::chrono::milliseconds> tm_sync_timeout_ms;
     property<model::violation_recovery_policy> tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
@@ -115,6 +120,11 @@ struct configuration final : public config_store {
     property<int16_t> id_allocator_replication;
     property<model::cleanup_policy_bitflags>
       transaction_coordinator_cleanup_policy;
+    property<std::chrono::milliseconds>
+      transaction_coordinator_delete_retention_ms;
+    property<uint64_t> transaction_coordinator_log_segment_size;
+    property<std::chrono::milliseconds>
+      abort_timed_out_transactions_interval_ms;
     property<std::chrono::milliseconds> create_topic_timeout_ms;
     property<std::chrono::milliseconds> wait_for_leader_timeout_ms;
     property<int32_t> default_topic_partitions;
@@ -176,6 +186,8 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_segment_upload_timeout_ms;
     property<std::chrono::milliseconds>
       cloud_storage_manifest_upload_timeout_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_max_connection_idle_time_ms;
 
     one_or_many_property<ss::sstring> superusers;
 
@@ -195,6 +207,11 @@ struct configuration final : public config_store {
     property<size_t> zstd_decompress_workspace_bytes;
     one_or_many_property<ss::sstring> full_raft_configuration_recovery_pattern;
     property<bool> enable_auto_rebalance_on_node_add;
+
+    property<bool> enable_leader_balancer;
+    property<std::chrono::milliseconds> leader_balancer_idle_timeout;
+    property<std::chrono::milliseconds> leader_balancer_mute_timeout;
+    property<std::chrono::milliseconds> leader_balancer_node_mute_timeout;
 
     configuration();
 
@@ -469,26 +486,6 @@ struct convert<config::tls_config> {
               to_absolute(read_optional(node, "truststore_file")),
               node["require_client_auth"]
                 && node["require_client_auth"].as<bool>());
-        }
-        return true;
-    }
-};
-
-template<typename T>
-struct convert<std::optional<T>> {
-    using type = std::optional<T>;
-
-    static Node encode(const type& rhs) {
-        if (rhs) {
-            return Node(*rhs);
-        }
-    }
-
-    static bool decode(const Node& node, type& rhs) {
-        if (node) {
-            rhs = std::make_optional<T>(node.as<T>());
-        } else {
-            rhs = std::nullopt;
         }
         return true;
     }

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "model/metadata.h"
 #include "seastarx.h"
 #include "utils/named_type.h"
 #include "utils/string_switch.h"
@@ -29,6 +30,7 @@ namespace pandaproxy::schema_registry {
 using permanent_delete = ss::bool_class<struct delete_tag>;
 using include_deleted = ss::bool_class<struct include_deleted_tag>;
 using is_deleted = ss::bool_class<struct is_deleted_tag>;
+using default_to_global = ss::bool_class<struct default_to_global_tag>;
 
 template<typename E>
 std::enable_if_t<std::is_enum_v<E>, std::optional<E>>
@@ -84,6 +86,54 @@ static constexpr schema_version invalid_schema_version{-1};
 using schema_id = named_type<int32_t, struct schema_id_tag>;
 static constexpr schema_id invalid_schema_id{-1};
 
+struct subject_version {
+    subject_version(subject s, schema_version v)
+      : sub{std::move(s)}
+      , version{v} {}
+    subject sub;
+    schema_version version;
+};
+
+// Very similar to topic_key_type, separate to avoid intermingling storage code
+enum class seq_marker_key_type { invalid = 0, schema, delete_subject, config };
+
+constexpr std::string_view to_string_view(seq_marker_key_type v) {
+    switch (v) {
+    case seq_marker_key_type::schema:
+        return "schema";
+        break;
+    case seq_marker_key_type::delete_subject:
+        return "delete_subject";
+        break;
+    case seq_marker_key_type::config:
+        return "config";
+        break;
+    default:
+        return "invalid";
+    }
+}
+
+// Record the sequence+node where updates were made to a subject,
+// in order to later generate tombstone keys when doing a permanent
+// deletion.
+struct seq_marker {
+    model::offset seq;
+    model::node_id node;
+    schema_version version;
+    seq_marker_key_type key_type{seq_marker_key_type::invalid};
+
+    friend std::ostream& operator<<(std::ostream& os, const seq_marker& v) {
+        fmt::print(
+          os,
+          "seq={} node={} version={} key_type={}",
+          v.seq,
+          v.node,
+          v.version,
+          to_string_view(v.key_type));
+        return os;
+    }
+};
+
 ///\brief Complete description of a schema.
 struct schema {
     schema(schema_id id, schema_type type, schema_definition definition)
@@ -110,6 +160,8 @@ struct subject_version_id {
     schema_version version;
     schema_id id;
     is_deleted deleted{is_deleted::no};
+
+    std::vector<seq_marker> written_at;
 };
 
 ///\brief All schema versions for a subject.

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "pandaproxy/logger.h"
 #include "pandaproxy/schema_registry/errors.h"
 #include "pandaproxy/schema_registry/types.h"
 
@@ -56,21 +57,6 @@ public:
         return {version, id, inserted};
     }
 
-    ///\brief Update or insert a schema with the given id, and register it with
-    /// the subject for the given version.
-    ///
-    /// return true if a new version was inserted, false if updated.
-    bool upsert(
-      subject sub,
-      schema_definition def,
-      schema_type type,
-      schema_id id,
-      schema_version version,
-      is_deleted deleted) {
-        upsert_schema(id, std::move(def), type);
-        return upsert_subject(std::move(sub), version, id, deleted);
-    }
-
     ///\brief Return a schema by id.
     result<schema> get_schema(const schema_id& id) const {
         auto it = _schemas.find(id);
@@ -90,6 +76,19 @@ public:
           });
         return s_it == _schemas.end() ? std::optional<schema_id>{}
                                       : s_it->first;
+    }
+
+    ///\brief Return a list of subject-versions for the shema id.
+    std::vector<subject_version> get_schema_subject_versions(schema_id id) {
+        std::vector<subject_version> svs;
+        for (const auto& s : _subjects) {
+            for (const auto& vs : s.second.versions) {
+                if (vs.id == id && !vs.deleted) {
+                    svs.emplace_back(s.first, vs.version);
+                }
+            }
+        }
+        return svs;
     }
 
     ///\brief Return subject_version_id for a subject and version
@@ -149,6 +148,111 @@ public:
         return res;
     }
 
+    ///\brief Return the value of the 'deleted' field on a subject
+    result<is_deleted> is_subject_deleted(const subject& sub) const {
+        auto sub_it = BOOST_OUTCOME_TRYX(
+          get_subject_iter(sub, include_deleted::yes));
+        return sub_it->second.deleted;
+    }
+
+    ///\brief Return the value of the 'deleted' field on a subject
+    result<is_deleted> is_subject_version_deleted(
+      const subject& sub, const schema_version version) const {
+        auto sub_it = BOOST_OUTCOME_TRYX(
+          get_subject_iter(sub, include_deleted::yes));
+        auto v_it = BOOST_OUTCOME_TRYX(
+          get_version_iter(*sub_it, version, include_deleted::yes));
+        return v_it->deleted;
+    }
+
+    /// \brief Return the seq_marker write history of a subject
+    ///
+    /// \return A vector with at least one element
+    result<std::vector<seq_marker>>
+    get_subject_written_at(const subject& sub) const {
+        auto sub_it = BOOST_OUTCOME_TRYX(
+          get_subject_iter(sub, include_deleted::yes));
+
+        if (!sub_it->second.deleted) {
+            // Refuse to yield sequence history for anything that
+            // hasn't been soft-deleted, to prevent a hard-delete
+            // from generating tombstones without a preceding soft-delete
+            return not_deleted(sub);
+        } else {
+            if (sub_it->second.written_at.empty()) {
+                // This should never happen (how can a record get into the
+                // store without an originating sequenced record?), but return
+                // an error instead of vasserting out.
+                return not_found(sub);
+            }
+
+            return sub_it->second.written_at;
+        }
+    }
+
+    /// \brief Return the seq_marker write history of a version.
+    ///
+    /// \return A vector with at least one element
+    result<std::vector<seq_marker>> get_subject_version_written_at(
+      const subject& sub, schema_version version) const {
+        auto sub_it = BOOST_OUTCOME_TRYX(
+          get_subject_iter(sub, include_deleted::yes));
+
+        auto v_it = BOOST_OUTCOME_TRYX(
+          get_version_iter(*sub_it, version, include_deleted::yes));
+
+        if (!v_it->deleted) {
+            // Refuse to yield sequence history for anything that
+            // hasn't been soft-deleted, to prevent a hard-delete
+            // from generating tombstones without a preceding soft-delete
+            return not_deleted(sub, version);
+        }
+
+        std::vector<seq_marker> result;
+        for (auto s : sub_it->second.written_at) {
+            if (s.version == version) {
+                result.push_back(s);
+            }
+        }
+
+        if (result.empty()) {
+            // This should never happen (how can a record get into the
+            // store without an originating sequenced record?), but return
+            // an error instead of vasserting out.
+            return not_found(sub, version);
+        }
+
+        return result;
+    }
+
+    ///\brief If this schema ID isn't already in the version list, return
+    ///       what the version number will be if it is inserted.
+    std::optional<schema_version>
+    project_version(const subject& sub, schema_id sid) const {
+        auto subject_iter = _subjects.find(sub);
+        if (subject_iter == _subjects.end()) {
+            // Subject doesn't exist yet.  First version will be 1.
+            return schema_version{1};
+        }
+
+        auto& versions = subject_iter->second.versions;
+
+        schema_version maxver{0};
+        for (auto v : versions) {
+            if (v.id == sid && !(v.deleted || subject_iter->second.deleted)) {
+                // No version to project, the schema is already
+                // present (and not deleted) in this subject.
+                // For a present-but-deleted case, we proceed
+                // to allocate a new version number.
+                return std::nullopt;
+            } else {
+                maxver = std::max(maxver, v.version);
+            }
+        }
+
+        return maxver + 1;
+    }
+
     ///\brief Return a list of versions and associated schema_id.
     result<std::vector<subject_version_id>>
     get_version_ids(const subject& sub, include_deleted inc_del) const {
@@ -157,8 +261,8 @@ public:
     }
 
     ///\brief Delete a subject.
-    result<std::vector<schema_version>>
-    delete_subject(const subject& sub, permanent_delete permanent) {
+    result<std::vector<schema_version>> delete_subject(
+      seq_marker marker, const subject& sub, permanent_delete permanent) {
         auto sub_it = BOOST_OUTCOME_TRYX(
           get_subject_iter(sub, include_deleted::yes));
 
@@ -170,48 +274,64 @@ public:
             return soft_deleted(sub);
         }
 
+        sub_it->second.written_at.push_back(marker);
         sub_it->second.deleted = is_deleted::yes;
 
-        const auto& versions = sub_it->second.versions;
+        auto& versions = sub_it->second.versions;
         std::vector<schema_version> res;
         res.reserve(versions.size());
-        std::transform(
-          versions.begin(),
-          versions.end(),
-          std::back_inserter(res),
-          [](const auto& v) { return v.version; });
+        for (const auto& ver : versions) {
+            if (permanent || !ver.deleted) {
+                res.push_back(ver.version);
+            }
+        }
 
         if (permanent) {
             _subjects.erase(sub_it);
+        } else {
+            // Mark all versions within the store deleted too: this matters
+            // if someone revives the subject with new versions later, as
+            // these older versions should remain deleted.
+            for (auto& v : versions) {
+                v.deleted = is_deleted::yes;
+            }
         }
 
         return res;
     }
 
-    ///\brief Delete a subject version
-    result<bool> delete_subject_version(
-      const subject& sub,
-      schema_version version,
-      permanent_delete permanent,
-      include_deleted inc_del) {
-        auto sub_it = BOOST_OUTCOME_TRYX(get_subject_iter(sub, inc_del));
+    ///\brief Delete a subject version.
+    result<bool>
+    delete_subject_version(const subject& sub, schema_version version) {
+        auto sub_it = BOOST_OUTCOME_TRYX(
+          get_subject_iter(sub, include_deleted::yes));
         auto& versions = sub_it->second.versions;
         auto v_it = BOOST_OUTCOME_TRYX(
           get_version_iter(*sub_it, version, include_deleted::yes));
 
-        if (!v_it->deleted && permanent && !inc_del) {
+        // A hard delete should always be preceded by a soft delete
+        if (!(v_it->deleted || sub_it->second.deleted)) {
             return not_deleted(sub, version);
         }
 
-        if (v_it->deleted && !permanent && !inc_del) {
-            return soft_deleted(sub, version);
+        versions.erase(v_it);
+
+        // Trim any seq_markers referring to this version, so
+        // that when we later hard-delete the subject, we do not
+        // emit more tombstones for versions already tombstoned
+        auto& markers = sub_it->second.written_at;
+        markers.erase(
+          std::remove_if(
+            markers.begin(),
+            markers.end(),
+            [&version](auto sm) { return sm.version == version; }),
+          markers.end());
+
+        if (versions.empty()) {
+            _subjects.erase(sub_it);
         }
 
-        if (permanent) {
-            versions.erase(v_it);
-            return true;
-        }
-        return std::exchange(v_it->deleted, is_deleted::yes) != is_deleted::yes;
+        return true;
     }
 
     ///\brief Get the global compatibility level.
@@ -220,10 +340,16 @@ public:
     }
 
     ///\brief Get the compatibility level for a subject, or fallback to global.
-    result<compatibility_level> get_compatibility(const subject& sub) const {
+    result<compatibility_level>
+    get_compatibility(const subject& sub, default_to_global fallback) const {
         auto sub_it = BOOST_OUTCOME_TRYX(
           get_subject_iter(sub, include_deleted::no));
-        return sub_it->second.compatibility.value_or(_compatibility);
+        if (fallback) {
+            return sub_it->second.compatibility.value_or(_compatibility);
+        } else if (sub_it->second.compatibility) {
+            return sub_it->second.compatibility.value();
+        }
+        return not_found(sub);
     }
 
     ///\brief Set the global compatibility level.
@@ -232,13 +358,13 @@ public:
     }
 
     ///\brief Set the compatibility level for a subject.
-    result<bool>
-    set_compatibility(const subject& sub, compatibility_level compatibility) {
-        auto sub_it = BOOST_OUTCOME_TRYX(
-          get_subject_iter(sub, include_deleted::no));
-
-        // TODO(Ben): Check needs to be made here?
-        return std::exchange(sub_it->second.compatibility, compatibility)
+    result<bool> set_compatibility(
+      seq_marker marker,
+      const subject& sub,
+      compatibility_level compatibility) {
+        auto& sub_entry = _subjects[sub];
+        sub_entry.written_at.push_back(marker);
+        return std::exchange(sub_entry.compatibility, compatibility)
                != compatibility;
     }
 
@@ -300,11 +426,15 @@ public:
     }
 
     bool upsert_subject(
-      subject sub, schema_version version, schema_id id, is_deleted deleted) {
+      seq_marker marker,
+      subject sub,
+      schema_version version,
+      schema_id id,
+      is_deleted deleted) {
         auto& subject_entry = _subjects[std::move(sub)];
-        // Inserting a version undeletes the subject
-        subject_entry.deleted = is_deleted::no;
         auto& versions = subject_entry.versions;
+        subject_entry.written_at.push_back(marker);
+
         const auto v_it = std::lower_bound(
           versions.begin(),
           versions.end(),
@@ -312,12 +442,27 @@ public:
           [](const subject_version_id& lhs, schema_version rhs) {
               return lhs.version < rhs;
           });
-        if (v_it != versions.end() && v_it->version == version) {
+
+        const bool found = v_it != versions.end() && v_it->version == version;
+        if (found) {
             *v_it = subject_version_id(version, id, deleted);
-            return false;
+        } else {
+            versions.insert(v_it, subject_version_id(version, id, deleted));
         }
-        versions.insert(v_it, subject_version_id(version, id, deleted));
-        return true;
+
+        const auto all_deleted = is_deleted(
+          std::all_of(versions.begin(), versions.end(), [](const auto& v) {
+              return v.deleted;
+          }));
+
+        if (deleted == all_deleted) {
+            // - If we're deleting and all are deleted, subject is deleted
+            // - If we're not deleting and some are not deleted, the subject
+            //   is not deleted.
+            subject_entry.deleted = deleted;
+        }
+
+        return !found;
     }
 
 private:
@@ -334,6 +479,8 @@ private:
         std::optional<compatibility_level> compatibility;
         std::vector<subject_version_id> versions;
         is_deleted deleted{false};
+
+        std::vector<seq_marker> written_at;
     };
     using schema_map = absl::btree_map<schema_id, schema_entry>;
     using subject_map = absl::node_hash_map<subject, subject_entry>;
@@ -392,7 +539,7 @@ private:
 
     schema_map _schemas;
     subject_map _subjects;
-    compatibility_level _compatibility{compatibility_level::none};
+    compatibility_level _compatibility{compatibility_level::backward};
 };
 
 } // namespace pandaproxy::schema_registry

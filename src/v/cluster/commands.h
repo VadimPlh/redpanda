@@ -59,11 +59,16 @@ static constexpr int8_t delete_topic_cmd_type = 1;
 static constexpr int8_t move_partition_replicas_cmd_type = 2;
 static constexpr int8_t finish_moving_partition_replicas_cmd_type = 3;
 static constexpr int8_t update_topic_properties_cmd_type = 4;
+static constexpr int8_t create_partition_cmd_type = 5;
+
 static constexpr int8_t create_user_cmd_type = 5;
 static constexpr int8_t delete_user_cmd_type = 6;
 static constexpr int8_t update_user_cmd_type = 7;
 static constexpr int8_t create_acls_cmd_type = 8;
 static constexpr int8_t delete_acls_cmd_type = 9;
+
+static constexpr int8_t set_data_policy_cmd_type = 10;
+static constexpr int8_t clear_data_policy_cmd_type = 11;
 // node management commands
 static constexpr int8_t decommission_node_cmd_type = 0;
 static constexpr int8_t recommission_node_cmd_type = 1;
@@ -99,6 +104,12 @@ using update_topic_properties_cmd = controller_command<
   update_topic_properties_cmd_type,
   model::record_batch_type::topic_management_cmd>;
 
+using create_partition_cmd = controller_command<
+  model::topic_namespace,
+  create_partititions_configuration_assignment,
+  create_partition_cmd_type,
+  model::record_batch_type::topic_management_cmd>;
+
 using create_user_cmd = controller_command<
   security::credential_user,
   security::scram_credential,
@@ -128,6 +139,18 @@ using delete_acls_cmd = controller_command<
   int8_t, // unused
   delete_acls_cmd_type,
   model::record_batch_type::acl_management_cmd>;
+
+using set_data_policy_cmd = controller_command<
+  model::topic_namespace,
+  set_datapolicy_cmd_data,
+  set_data_policy_cmd_type,
+  model::record_batch_type::data_policy_management_cmd>;
+
+using clear_data_policy_cmd = controller_command<
+  model::topic_namespace,
+  int8_t, // unused
+  set_data_policy_cmd_type,
+  model::record_batch_type::data_policy_management_cmd>;
 
 using decommission_node_cmd = controller_command<
   model::node_id,

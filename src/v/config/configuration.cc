@@ -61,6 +61,12 @@ configuration::configuration()
       required::no,
       tls_config(),
       tls_config::validate)
+  , rpc_server_listen_backlog(
+      *this,
+      "rpc_server_listen_backlog",
+      "TCP connection queue length for Kafka server and internal RPC server",
+      required::no,
+      std::nullopt)
   , enable_coproc(
       *this, "enable_coproc", "Enable coprocessing mode", required::no, false)
   , coproc_supervisor_server(
@@ -93,6 +99,19 @@ configuration::configuration()
       "Interval for which all coprocessor offsets are flushed to disk",
       required::no,
       300000ms) // five minutes
+  , enable_v8(*this, "enable_v8", "Enable v8 engine", required::no, false)
+  , core_for_executor(
+      *this,
+      "core_for_executor",
+      "Core for std::thread in executor",
+      required::no,
+      0)
+  , max_executor_queue_size(
+      *this,
+      "max_executor_queue_size",
+      "Max queue size for wating task in executor",
+      required::no,
+      ss::smp::count)
   , node_id(
       *this,
       "node_id",
@@ -116,6 +135,13 @@ configuration::configuration()
       "raft heartbeat RPC timeout",
       required::no,
       3s)
+  , raft_heartbeat_disconnect_failures(
+      *this,
+      "raft_heartbeat_disconnect_failures",
+      "After how many failed heartbeats to forcibly close an unresponsive TCP "
+      "connection.  Set to 0 to disable force disconnection.",
+      required::no,
+      3)
   , seed_servers(
       *this,
       "seed_servers",
@@ -256,13 +282,6 @@ configuration::configuration()
       "failing a request",
       required::no,
       30)
-  , stm_snapshot_recovery_policy(
-      *this,
-      "stm_snapshot_recovery_policy",
-      "Describes how to recover from an invariant violation happened "
-      "during reading a stm snapshot",
-      required::no,
-      model::violation_recovery_policy::crash)
   , tm_sync_timeout_ms(
       *this,
       "tm_sync_timeout_ms",
@@ -401,7 +420,25 @@ configuration::configuration()
       "transaction_coordinator_cleanup_policy",
       "Cleanup policy for a transaction coordinator topic",
       required::no,
-      model::cleanup_policy_bitflags::compaction)
+      model::cleanup_policy_bitflags::deletion)
+  , transaction_coordinator_delete_retention_ms(
+      *this,
+      "transaction_coordinator_delete_retention_ms",
+      "delete segments older than this - default 1 week",
+      required::no,
+      10080min)
+  , transaction_coordinator_log_segment_size(
+      *this,
+      "transaction_coordinator_log_segment_size",
+      "How large in bytes should each log segment be (default 1G)",
+      required::no,
+      1_GiB)
+  , abort_timed_out_transactions_interval_ms(
+      *this,
+      "abort_timed_out_transactions_interval_ms",
+      "How often look for the inactive transactions and abort them",
+      required::no,
+      1min)
   , create_topic_timeout_ms(
       *this,
       "create_topic_timeout_ms",
@@ -729,6 +766,12 @@ configuration::configuration()
       "Manifest upload timeout (ms)",
       required::no,
       10s)
+  , cloud_storage_max_connection_idle_time_ms(
+      *this,
+      "cloud_storage_max_connection_idle_time_ms",
+      "Max https connection idle time (ms)",
+      required::no,
+      5s)
   , superusers(
       *this, "superusers", "List of superuser usernames", required::no, {})
   , kafka_qdc_latency_alpha(
@@ -809,6 +852,30 @@ configuration::configuration()
       "Enable automatic partition rebalancing when new nodes are added",
       required::no,
       false)
+  , enable_leader_balancer(
+      *this,
+      "enable_leader_balancer",
+      "Enable automatic leadership rebalancing",
+      required::no,
+      true)
+  , leader_balancer_idle_timeout(
+      *this,
+      "leader_balancer_idle_timeout",
+      "Leadership rebalancing idle timeout",
+      required::no,
+      2min)
+  , leader_balancer_mute_timeout(
+      *this,
+      "leader_balancer_mute_timeout",
+      "Leadership rebalancing mute timeout",
+      required::no,
+      5min)
+  , leader_balancer_node_mute_timeout(
+      *this,
+      "leader_balancer_mute_timeout",
+      "Leadership rebalancing node mute timeout",
+      required::no,
+      20s)
   , _advertised_kafka_api(
       *this,
       "advertised_kafka_api",

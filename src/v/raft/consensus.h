@@ -271,8 +271,10 @@ public:
      * Attempt to transfer leadership to another node in this raft group. If no
      * node is specified, the most up-to-date node will be selected.
      */
+    ss::future<transfer_leadership_reply>
+      transfer_leadership(transfer_leadership_request);
     ss::future<std::error_code>
-      transfer_leadership(std::optional<model::node_id>);
+      do_transfer_leadership(std::optional<model::node_id>);
 
     ss::future<> remove_persistent_state();
 
@@ -302,6 +304,10 @@ public:
     void update_suppress_heartbeats(
       vnode, follower_req_seq, heartbeats_suppressed);
 
+    void update_heartbeat_status(vnode, bool);
+
+    bool should_reconnect_follower(vnode);
+
     std::vector<follower_metrics> get_follower_metrics() const;
 
     const configuration_manager& get_configuration_manager() const {
@@ -311,6 +317,8 @@ public:
     offset_monitor& visible_offset_monitor() {
         return _consumable_offset_monitor;
     }
+
+    ss::future<> refresh_commit_index();
 
 private:
     friend replicate_entries_stm;
@@ -330,6 +338,11 @@ private:
     do_append_entries(append_entries_request&&);
     ss::future<install_snapshot_reply>
     do_install_snapshot(install_snapshot_request&& r);
+
+    ss::future<result<replicate_result>> dispatch_replicate(
+      append_entries_request,
+      std::vector<ss::semaphore_units<>>,
+      absl::flat_hash_map<vnode, follower_req_seq>);
     /**
      * Hydrate the consensus state with the data from the snapshot
      */
@@ -549,6 +562,7 @@ private:
 
     std::chrono::milliseconds _replicate_append_timeout;
     std::chrono::milliseconds _recovery_append_timeout;
+    size_t _heartbeat_disconnect_failures;
     ss::metrics::metric_groups _metrics;
     ss::abort_source _as;
     storage::api& _storage;

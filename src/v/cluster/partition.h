@@ -129,7 +129,7 @@ public:
 
     ss::future<std::error_code>
     transfer_leadership(std::optional<model::node_id> target) {
-        return _raft->transfer_leadership(target);
+        return _raft->do_transfer_leadership(target);
     }
 
     ss::future<std::error_code> update_replica_set(
@@ -160,7 +160,7 @@ public:
         return _raft->get_configuration_manager();
     }
 
-    ss::shared_ptr<cluster::rm_stm> rm_stm() { return _rm_stm; }
+    ss::shared_ptr<cluster::rm_stm> rm_stm();
 
     size_t size_bytes() const { return _raft->log().size_bytes(); }
     ss::future<> update_configuration(topic_properties);
@@ -195,6 +195,8 @@ private:
     ss::abort_source _as;
     partition_probe _probe;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
+    bool _is_tx_enabled{false};
+    bool _is_idempotence_enabled{false};
 
     friend std::ostream& operator<<(std::ostream& o, const partition& x);
 };

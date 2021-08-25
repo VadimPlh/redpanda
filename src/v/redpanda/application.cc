@@ -126,7 +126,12 @@ int application::run(int ac, char** av) {
       buf.release,
       buf.nodename,
       buf.machine);
-    ss::app_template app = setup_app_template();
+    ss::app_template app(setup_app_config());
+    app.add_options()(
+      "redpanda-cfg",
+      po::value<std::string>(),
+      ".yaml file config for redpanda");
+
     return app.run(ac, av, [this, &app] {
         auto& cfg = app.configuration();
         log_system_resources(_log, cfg);
@@ -254,18 +259,13 @@ void application::validate_arguments(const po::variables_map& cfg) {
 
 void application::init_env() { std::setvbuf(stdout, nullptr, _IOLBF, 1024); }
 
-ss::app_template application::setup_app_template() {
+ss::app_template::config application::setup_app_config() {
     ss::app_template::config app_cfg;
     app_cfg.name = "Redpanda";
     using namespace std::literals::chrono_literals; // NOLINT
     app_cfg.default_task_quota = 500us;
     app_cfg.auto_handle_sigint_sigterm = false;
-    auto app = ss::app_template(app_cfg);
-    app.add_options()(
-      "redpanda-cfg",
-      po::value<std::string>(),
-      ".yaml file config for redpanda");
-    return app;
+    return app_cfg;
 }
 
 void application::hydrate_config(const po::variables_map& cfg) {
@@ -471,6 +471,15 @@ void application::wire_up_services() {
         construct_service(
           _schema_registry_client, to_yaml(*_schema_reg_client_config))
           .get();
+
+        construct_service(
+          _schema_registry_sequencer,
+          config::shard_local_cfg().node_id(),
+          smp_service_groups.proxy_smp_sg(),
+          std::reference_wrapper(_schema_registry_client),
+          std::reference_wrapper(_schema_registry_store))
+          .get();
+
         construct_service(
           _schema_registry,
           to_yaml(*_schema_reg_config),
@@ -479,7 +488,8 @@ void application::wire_up_services() {
           // https://github.com/vectorizedio/redpanda/issues/1392
           memory_groups::kafka_total_memory(),
           std::reference_wrapper(_schema_registry_client),
-          std::reference_wrapper(_schema_registry_store))
+          std::reference_wrapper(_schema_registry_store),
+          std::reference_wrapper(_schema_registry_sequencer))
           .get();
     }
 }
@@ -508,6 +518,28 @@ void application::wire_up_redpanda_services() {
           pacemaker,
           config::shard_local_cfg().coproc_supervisor_server(),
           std::ref(storage))
+          .get();
+    }
+
+    if (v8_enabled()) {
+        syschecks::systemd_message("Intializing v8 enviroment").get();
+        _v8_env.emplace();
+
+        auto& cfg = config::shard_local_cfg();
+        construct_single_service(
+          _executor,
+          std::ref(ss::engine().alien()),
+          cfg.core_for_executor,
+          cfg.max_executor_queue_size);
+        _executor->start().get();
+
+        _data_policy_handler
+          = std::make_unique<coproc::wasm::data_policy_event_handler>();
+
+        construct_service(
+          v8_scripts_dispatcher,
+          std::ref(*_executor),
+          std::ref(*_data_policy_handler))
           .get();
     }
 
@@ -557,7 +589,8 @@ void application::wire_up_redpanda_services() {
       _raft_connection_cache,
       partition_manager,
       shard_table,
-      storage);
+      storage,
+      std::ref(raft_group_manager));
 
     controller->wire_up().get0();
     syschecks::systemd_message("Creating kafka metadata cache").get();
@@ -637,6 +670,8 @@ void application::wire_up_redpanda_services() {
               c.max_service_memory_per_core = memory_groups::rpc_total_memory();
               c.disable_metrics = rpc::metrics_disabled(
                 config::shard_local_cfg().disable_metrics());
+              c.listen_backlog
+                = config::shard_local_cfg().rpc_server_listen_backlog;
               auto rpc_builder = config::shard_local_cfg()
                                    .rpc_server_tls()
                                    .get_credentials_builder()
@@ -731,6 +766,8 @@ void application::wire_up_redpanda_services() {
           return ss::async([this, &c] {
               c.max_service_memory_per_core
                 = memory_groups::kafka_total_memory();
+              c.listen_backlog
+                = config::shard_local_cfg().rpc_server_listen_backlog;
               auto& tls_config
                 = config::shard_local_cfg().kafka_api_tls.value();
               for (const auto& ep : config::shard_local_cfg().kafka_api()) {
@@ -782,6 +819,19 @@ void application::wire_up_redpanda_services() {
       fetch_session_cache,
       config::shard_local_cfg().fetch_session_eviction_timeout_ms())
       .get();
+    /**
+     * When redpanda stops we need to shutdown all partitions to prevent it
+     * accepting new requests and additionally we need to finish/fail all
+     * ongoing requests before trying to stop kafka RPC. We need this
+     * additionall action in stop sequence since it is required to have
+     * `ss::sharded` instance of partition manager before kafka server is
+     * started.
+     */
+    _deferred.emplace_back([this] {
+        partition_manager
+          .invoke_on_all(&cluster::partition_manager::shutdown_all)
+          .get();
+    });
     construct_service(
       _compaction_controller,
       std::ref(storage),
@@ -908,6 +958,9 @@ void application::start_redpanda() {
             _scheduling_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
             std::ref(controller->get_partition_leaders()));
+          if (!config::shard_local_cfg().disable_metrics()) {
+              proto->setup_metrics();
+          }
           s.set_protocol(std::move(proto));
       })
       .get();
@@ -960,6 +1013,7 @@ void application::start_redpanda() {
             controller->get_security_frontend(),
             controller->get_api(),
             tx_gateway_frontend,
+            v8_scripts_dispatcher,
             qdc_config);
           s.set_protocol(std::move(proto));
       })
@@ -968,11 +1022,31 @@ void application::start_redpanda() {
     vlog(
       _log.info, "Started Kafka API server listening at {}", conf.kafka_api());
 
-    if (coproc_enabled()) {
-        construct_single_service(_wasm_event_listener, std::ref(pacemaker));
+    if (coproc_enabled() || v8_enabled()) {
+        construct_single_service(_wasm_event_listener);
+
+        if (coproc_enabled()) {
+            _async_handler
+              = std::make_unique<coproc::wasm::async_event_handler>(
+                std::ref(pacemaker));
+
+            _wasm_event_listener->register_handler(
+              coproc::wasm::event_type::async, _async_handler.get());
+        }
+
+        if (v8_enabled()) {
+            _wasm_event_listener->register_handler(
+              coproc::wasm::event_type::data_policy,
+              _data_policy_handler.get());
+        }
+
         _wasm_event_listener->start().get();
+    }
+
+    if (coproc_enabled()) {
         pacemaker.invoke_on_all(&coproc::pacemaker::start).get();
     }
+
     if (config::shard_local_cfg().enable_admin_api()) {
         _admin.invoke_on_all(&admin_server::start).get0();
     }

@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include "model/record.h"
 #include "seastarx.h"
 #include "v8_engine/environment.h"
 
@@ -52,8 +53,8 @@ public:
 
     script(const script& other) = delete;
     script& operator=(const script& other) = delete;
-    script(script&& other) = delete;
-    script& operator=(script&& other) = delete;
+    script(script&& other) = default;
+    script& operator=(script&& other) = default;
 
     // Destroy instance. Be carefull!
     // First of all run Reset for all v8::Global fileds
@@ -67,10 +68,7 @@ public:
     /// temporary_buffer. Maybe better use iobuf and use non-seastar memory for
     /// data in v8 script. \param executor for compile script
     template<typename Executor>
-    ss::future<> init(
-      ss::sstring name,
-      ss::temporary_buffer<char> js_code,
-      Executor& executor) {
+    ss::future<> init(ss::sstring name, iobuf js_code, Executor& executor) {
         compile_task task(*this, std::move(js_code));
         return add_future_handlers(
                  executor.submit(std::move(task), _first_run_timeout_ms))
@@ -79,12 +77,11 @@ public:
 
     /// Run function from js script.
     ///
-    /// \param data for js script. TODO: think about temporary_buffer. Maybe
-    /// better use iobuf and use non-seastar memory for data in v8 script.
+    /// \param data for js script..
     /// \param executor for run script
     template<typename Executor>
-    ss::future<> run(ss::temporary_buffer<char> data, Executor& executor) {
-        run_task task(*this, std::move(data));
+    ss::future<> run(model::record_batch& batch, Executor& executor) {
+        run_task task(*this, batch);
         return add_future_handlers(
           executor.submit(std::move(task), _timeout_ms));
     }
@@ -92,7 +89,7 @@ public:
 private:
     // Must be running in executor, because it runs js code
     // in first time for init global vars and e.t.c.
-    void compile_script(ss::temporary_buffer<char> js_code);
+    void compile_script(iobuf js_code);
 
     // Init function from compiled js code.
     void set_function(std::string_view name);
@@ -102,8 +99,8 @@ private:
     /// because js function can have inf loop or smth like that.
     /// We need to controle execution time for js function
 
-    /// \param buffer with data, wich js code can read and edit.
-    void run_internal(ss::temporary_buffer<char> data);
+    /// \param record_batch fot js script.
+    void run_internal(model::record_batch& _batch);
 
     // Throw c++ exception from v8::TryCatch
     void throw_exception_from_v8(std::string_view msg);
@@ -143,9 +140,8 @@ private:
 
     class task_for_executor {
     public:
-        task_for_executor(script& script, ss::temporary_buffer<char> data)
-          : _script(script)
-          , _data(std::move(data)) {}
+        explicit task_for_executor(script& script)
+          : _script(script) {}
 
         virtual void operator()() = 0;
 
@@ -155,25 +151,32 @@ private:
 
     protected:
         script& _script;
-        ss::temporary_buffer<char> _data;
     };
 
     friend class task_for_executor;
 
     class compile_task : public task_for_executor {
     public:
-        compile_task(script& script, ss::temporary_buffer<char> data)
-          : task_for_executor(script, std::move(data)) {}
+        compile_task(script& script, iobuf data)
+          : task_for_executor(script)
+          , _data(std::move(data)) {}
 
         void operator()() override { _script.compile_script(std::move(_data)); }
+
+    private:
+        iobuf _data;
     };
 
     class run_task : public task_for_executor {
     public:
-        run_task(script& script, ss::temporary_buffer<char> data)
-          : task_for_executor(script, std::move(data)) {}
+        run_task(script& script, model::record_batch& batch)
+          : task_for_executor(script)
+          , _batch(batch) {}
 
-        void operator()() override { _script.run_internal(std::move(_data)); }
+        void operator()() override { _script.run_internal(_batch); }
+
+    private:
+        model::record_batch& _batch;
     };
 };
 

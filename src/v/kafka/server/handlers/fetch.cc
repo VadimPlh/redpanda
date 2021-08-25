@@ -18,11 +18,13 @@
 #include "kafka/server/fetch_session.h"
 #include "kafka/server/handlers/fetch/fetch_plan_executor.h"
 #include "kafka/server/handlers/fetch/fetch_planner.h"
+#include "kafka/server/logger.h"
 #include "kafka/server/materialized_partition.h"
 #include "kafka/server/partition_proxy.h"
 #include "kafka/server/replicated_partition.h"
 #include "likely.h"
 #include "model/fundamental.h"
+#include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/record_utils.h"
 #include "model/timeout_clock.h"
@@ -30,6 +32,8 @@
 #include "resource_mgmt/io_priority.h"
 #include "storage/parser_utils.h"
 #include "utils/to_string.h"
+#include "v8_engine/executor.h"
+#include "v8_engine/v8_batch_consumer.h"
 
 #include <seastar/core/do_with.hh>
 #include <seastar/core/sleep.hh>
@@ -121,34 +125,73 @@ model::record_batch adapt_fetch_batch(model::record_batch&& batch) {
       header, std::move(records), model::record_batch::tag_ctor_ng{});
 }
 
+using script_with_env
+  = v8_engine::script_with_env_wrapper<v8_engine::executor_wrapper>;
+
+static ss::future<std::optional<script_with_env>> get_wasm_script(
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher,
+  const model::ntp& ntp) {
+    std::optional<script_with_env> res;
+    const auto& cfg = config::shard_local_cfg();
+    if (cfg.developer_mode() && cfg.enable_v8()) {
+        auto& local_scripts_dispatcher = v8_scripts_dispatcher.local();
+        model::topic_namespace_view topic_view(ntp);
+        auto script_wrapper = co_await local_scripts_dispatcher.get_script(
+          model::topic_namespace(topic_view));
+        if (script_wrapper.contains_script()) {
+            res.emplace(std::move(script_wrapper));
+        }
+    }
+    co_return res;
+}
+
 /**
  * Low-level handler for reading from an ntp. Runs on ntp's home core.
  */
 static ss::future<read_result> read_from_partition(
   kafka::partition_proxy part,
-  fetch_config config,
+  ntp_fetch_config config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline,
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher) {
     auto hw = part.high_watermark();
     auto lso = part.last_stable_offset();
     auto start_o = part.start_offset();
     // if we have no data read, return fast
-    if (hw < config.start_offset || config.skip_read) {
+    if (hw < config.cfg.start_offset || config.cfg.skip_read) {
         co_return read_result(start_o, hw, lso);
     }
 
     storage::log_reader_config reader_config(
-      config.start_offset,
-      config.max_offset,
+      config.cfg.start_offset,
+      config.cfg.max_offset,
       0,
-      config.max_bytes,
+      config.cfg.max_bytes,
       kafka_read_priority(),
       std::nullopt,
       std::nullopt,
       std::nullopt);
 
-    reader_config.strict_max_bytes = config.strict_max_bytes;
+    reader_config.strict_max_bytes = config.cfg.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
+
+    try {
+        auto script_with_env = co_await get_wasm_script(
+          v8_scripts_dispatcher, config.ntp());
+        if (script_with_env.has_value()) {
+            rdr = co_await std::move(rdr).consume(
+              v8_engine::v8_batch_consumer<v8_engine::executor_wrapper>(
+                std::move(script_with_env.value())),
+              deadline ? *deadline : model::no_timeout);
+        }
+    } catch (const std::runtime_error& ex) {
+        vlog(klog.error, "Error in inline transformation {}", ex.what());
+        co_return error_code::invalid_config;
+    } catch (const v8_engine::script_exception& ex) {
+        vlog(klog.error, "Error in inline transformation {}", ex.what());
+        co_return error_code::invalid_config;
+    }
+
     auto result = co_await std::move(rdr).consume(
       kafka_batch_serializer(), deadline ? *deadline : model::no_timeout);
     auto data = std::make_unique<iobuf>(std::move(result.data));
@@ -172,14 +215,15 @@ static ss::future<read_result> read_from_partition(
 }
 
 /**
- * Entry point for reading from an ntp. This is executed on NTP home core and
- * build error responses if anything goes wrong.
+ * Entry point for reading from an ntp. This is executed on NTP home core
+ * and build error responses if anything goes wrong.
  */
 static ss::future<read_result> do_read_from_ntp(
   cluster::partition_manager& mgr,
   ntp_fetch_config ntp_config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline,
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher) {
     /*
      * lookup the ntp's partition
      */
@@ -214,7 +258,11 @@ static ss::future<read_result> do_read_from_ntp(
     }
 
     return read_from_partition(
-      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline);
+      std::move(*kafka_partition),
+      ntp_config,
+      foreign_read,
+      deadline,
+      v8_scripts_dispatcher);
 }
 
 static ntp_fetch_config make_ntp_fetch_config(
@@ -227,24 +275,32 @@ ss::future<read_result> read_from_ntp(
   const model::materialized_ntp& ntp,
   fetch_config config,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline,
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher) {
     return do_read_from_ntp(
-      pm, make_ntp_fetch_config(ntp, config), foreign_read, deadline);
+      pm,
+      make_ntp_fetch_config(ntp, config),
+      foreign_read,
+      deadline,
+      v8_scripts_dispatcher);
 }
 
 static void fill_fetch_responses(
   op_context& octx,
   std::vector<read_result> results,
-  std::vector<op_context::response_iterator> responses) {
+  std::vector<op_context::response_iterator> responses,
+  std::vector<std::unique_ptr<hdr_hist::measurement>> metrics) {
     auto range = boost::irange<size_t>(0, results.size());
     for (auto idx : range) {
         auto& res = results[idx];
         auto& resp_it = responses[idx];
+        auto& metric = metrics[idx];
 
         // error case
         if (unlikely(res.error != error_code::none)) {
             resp_it.set(
               make_partition_response_error(res.partition, res.error));
+            metric->set_trace(false);
             continue;
         }
 
@@ -272,8 +328,8 @@ static void fill_fetch_responses(
         resp.last_stable_offset = res.last_stable_offset;
 
         /**
-         * According to KIP-74 we have to return first batch even if it would
-         * violate max_bytes fetch parameter
+         * According to KIP-74 we have to return first batch even if it
+         * would violate max_bytes fetch parameter
          */
         if (
           res.has_data()
@@ -302,6 +358,7 @@ static void fill_fetch_responses(
         }
 
         resp_it.set(std::move(resp));
+        metric = nullptr;
     }
 }
 
@@ -309,12 +366,15 @@ static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
   cluster::partition_manager& mgr,
   std::vector<ntp_fetch_config> ntp_fetch_configs,
   bool foreign_read,
-  std::optional<model::timeout_clock::time_point> deadline) {
+  std::optional<model::timeout_clock::time_point> deadline,
+  ss::sharded<v8_engine::scripts_table>& v8_scripts_dispatcher) {
     return ssx::parallel_transform(
       std::move(ntp_fetch_configs),
-      [&mgr, deadline, foreign_read](const ntp_fetch_config& ntp_cfg) {
+      [&mgr, deadline, foreign_read, &v8_scripts_dispatcher](
+        const ntp_fetch_config& ntp_cfg) {
           auto p_id = ntp_cfg.ntp().tp.partition;
-          return do_read_from_ntp(mgr, ntp_cfg, foreign_read, deadline)
+          return do_read_from_ntp(
+                   mgr, ntp_cfg, foreign_read, deadline, v8_scripts_dispatcher)
             .then([p_id](read_result res) {
                 res.partition = p_id;
                 return res;
@@ -349,14 +409,21 @@ handle_shard_fetch(ss::shard_id shard, op_context& octx, shard_fetch fetch) {
         octx.ssg,
         [foreign_read,
          deadline = octx.deadline,
-         configs = std::move(fetch.requests)](
+         configs = std::move(fetch.requests),
+         &v8_scripts_dispatcher = octx.rctx.v8_scripts_dispatcher()](
           cluster::partition_manager& mgr) mutable {
             return fetch_ntps_in_parallel(
-              mgr, std::move(configs), foreign_read, deadline);
+              mgr,
+              std::move(configs),
+              foreign_read,
+              deadline,
+              v8_scripts_dispatcher);
         })
       .then([responses = std::move(fetch.responses),
+             metrics = std::move(fetch.metrics),
              &octx](std::vector<read_result> results) mutable {
-          fill_fetch_responses(octx, std::move(results), std::move(responses));
+          fill_fetch_responses(
+            octx, std::move(results), std::move(responses), std::move(metrics));
       });
 }
 
@@ -365,15 +432,15 @@ class parallel_fetch_plan_executor final : public fetch_plan_executor::impl {
         std::vector<ss::future<>> fetches;
         fetches.reserve(ss::smp::count);
 
-        // start fetching from random shard to make sure that we fetch data from
-        // all the partition even if we reach fetch message size limit
+        // start fetching from random shard to make sure that we fetch data
+        // from all the partition even if we reach fetch message size limit
         const ss::shard_id start_shard_idx = random_generators::get_int(
           ss::smp::count - 1);
         for (size_t i = 0; i < ss::smp::count; ++i) {
             auto shard = (start_shard_idx + i) % ss::smp::count;
 
-            fetches.push_back(
-              handle_shard_fetch(shard, octx, plan.fetches_per_shard[shard]));
+            fetches.push_back(handle_shard_fetch(
+              shard, octx, std::move(plan.fetches_per_shard[shard])));
         }
 
         return ss::when_all_succeed(fetches.begin(), fetches.end());
@@ -452,7 +519,9 @@ class simple_fetch_planner final : public fetch_planner::impl {
               };
 
               plan.fetches_per_shard[*shard].push_back(
-                make_ntp_fetch_config(materialized_ntp, config), resp_it++);
+                make_ntp_fetch_config(materialized_ntp, config),
+                resp_it++,
+                octx.rctx.probe().auto_fetch_measurement());
           });
 
         return plan;

@@ -58,19 +58,32 @@ inline bool contains_node(
       });
 }
 
-bool is_configuration_up_to_date(
+std::error_code check_configuration_update(
   model::node_id self,
   const ss::lw_shared_ptr<partition>& partition,
   const std::vector<model::broker_shard>& bs,
   model::revision_id change_revision) {
     auto group_cfg = partition->group_configuration();
+    vlog(
+      clusterlog.trace,
+      "checking if partition {} configuration {} is up to date with {}",
+      partition->ntp(),
+      group_cfg,
+      bs);
     auto configuration_committed = partition->get_latest_configuration_offset()
                                    <= partition->committed_offset();
 
     // group configuration revision is older than expected, this configuration
     // isn't up to date.
     if (group_cfg.revision_id() < change_revision) {
-        return false;
+        vlog(
+          clusterlog.trace,
+          "partition {} configuration revision '{}' is smaller than requested "
+          "update revision '{}'",
+          partition->ntp(),
+          group_cfg.revision_id(),
+          change_revision);
+        return errc::partition_configuration_revision_not_updated;
     }
     bool includes_self = contains_node(self, bs);
 
@@ -89,14 +102,24 @@ bool is_configuration_up_to_date(
      *
      */
     if (includes_self && group_cfg.type() == raft::configuration_type::joint) {
-        return false;
+        vlog(
+          clusterlog.trace,
+          "partition {} contains current node and its consensus configuration "
+          "is still in joint state",
+          partition->ntp());
+        return errc::partition_configuration_in_joint_mode;
     }
     /*
      * if replica set is a leader it must have configuration committed i.e. it
      * was successfully replicated to majority of followers.
      */
     if (partition->is_leader() && !configuration_committed) {
-        return false;
+        vlog(
+          clusterlog.trace,
+          "current node is partition {} leader, waiting for configuration to "
+          "be committed",
+          partition->ntp());
+        return errc::partition_configuration_leader_config_not_committed;
     }
 
     /**
@@ -122,13 +145,28 @@ bool is_configuration_up_to_date(
 
     // there is different number of brokers in group configuration
     if (all_ids.size() != bs.size()) {
-        return false;
+        vlog(
+          clusterlog.trace,
+          "requested replica set {} differs from partition replica set: {}",
+          bs,
+          group_cfg.brokers());
+        return errc::partition_configuration_differs;
     }
 
     for (auto& b : bs) {
         all_ids.emplace(b.node_id);
     }
-    return all_ids.size() == bs.size();
+
+    if (all_ids.size() != bs.size()) {
+        vlog(
+          clusterlog.trace,
+          "requested replica set {} differs from partition replica set: {}",
+          bs,
+          group_cfg.brokers());
+        return errc::partition_configuration_differs;
+    }
+
+    return errc::success;
 }
 
 controller_backend::controller_backend(
@@ -347,14 +385,38 @@ ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
         try {
             auto ec = co_await execute_partitition_op(*it);
             if (ec) {
+                if (it->type == topic_table_delta::op_type::update) {
+                    /**
+                     * check if pending update isn't already finished, if so it
+                     * is safe to proceed to the next step
+                     */
+                    auto fit = std::find_if(
+                      it, deltas.end(), [&it](const topic_table::delta& d) {
+                          return d.type
+                                   == topic_table::delta::op_type::
+                                     update_finished
+                                 && d.new_assignment.replicas
+                                      == it->new_assignment.replicas;
+                      });
+                    vassert(
+                      fit == std::next(it),
+                      "finish operation command, if present have to be the one "
+                      "that follows update operation");
+
+                    if (fit != deltas.end()) {
+                        it = fit;
+                        continue;
+                    }
+                }
                 vlog(
                   clusterlog.info,
-                  "partition operation error: {} - {}",
+                  "partition operation {} result: {}",
                   *it,
                   ec.message());
                 stop = true;
                 continue;
             }
+            vlog(clusterlog.info, "partition operation {} finished", *it);
         } catch (...) {
             vlog(
               clusterlog.error,
@@ -487,6 +549,14 @@ controller_backend::ask_remote_shard_for_initail_rev(
       });
 }
 
+bool are_assignments_equal(
+  const partition_assignment& requested, const partition_assignment& previous) {
+    if (requested.id != previous.id || requested.group != previous.group) {
+        return false;
+    }
+    return are_replica_sets_equal(requested.replicas, previous.replicas);
+}
+
 ss::future<std::error_code> controller_backend::process_partition_update(
   model::ntp ntp,
   const partition_assignment& requested,
@@ -563,6 +633,14 @@ ss::future<std::error_code> controller_backend::process_partition_update(
      * be applied
      */
     if (partition) {
+        // if requested assignment is equal to current one, just finish the
+        // update
+        if (are_assignments_equal(requested, previous)) {
+            if (requested.replicas.front().node_id == _self) {
+                co_return co_await dispatch_update_finished(
+                  std::move(ntp), requested);
+            }
+        }
         auto ec = co_await update_partition_replica_set(
           ntp, requested.replicas, rev);
 
@@ -587,7 +665,7 @@ ss::future<std::error_code> controller_backend::process_partition_update(
          * If update wasn't successfull (f.e. current node is not a leader),
          * wait for next iteration.
          */
-        co_return std::error_code(errc::waiting_for_recovery);
+        co_return ec;
     }
 
     /**
@@ -738,7 +816,9 @@ ss::future<std::error_code> controller_backend::update_partition_replica_set(
     auto partition = _partition_manager.local().get(ntp);
     // wait for configuration update, only declare success
     // when configuration was actually updated
-    if (is_configuration_up_to_date(_self, partition, replicas, rev)) {
+    auto update_ec = check_configuration_update(
+      _self, partition, replicas, rev);
+    if (!update_ec) {
         return ss::make_ready_future<std::error_code>(errc::success);
     }
     // we are the leader, update configuration
@@ -762,11 +842,8 @@ ss::future<std::error_code> controller_backend::update_partition_replica_set(
               }
           })
           .then([this, partition, replicas, rev](std::error_code) {
-              if (is_configuration_up_to_date(
-                    _self, partition, replicas, rev)) {
-                  return make_error_code(errc::success);
-              }
-              return make_error_code(errc::waiting_for_recovery);
+              return check_configuration_update(
+                _self, partition, replicas, rev);
           });
     }
 
@@ -779,17 +856,11 @@ ss::future<> controller_backend::add_to_shard_table(
   uint32_t shard,
   model::revision_id revision) {
     // update shard_table: broadcast
-
+    vlog(
+      clusterlog.trace, "adding {} to shard table at {}", revision, ntp, shard);
     return _shard_table.invoke_on_all(
-      [self = _self, ntp = std::move(ntp), raft_group, shard, revision](
+      [ntp = std::move(ntp), raft_group, shard, revision](
         shard_table& s) mutable {
-          vlog(
-            clusterlog.trace,
-            "[n: {}, r: {}] adding {} to shard table at {}",
-            self,
-            revision,
-            ntp,
-            shard);
           s.update(ntp, raft_group, shard, revision);
       });
 }

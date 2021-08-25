@@ -28,20 +28,27 @@ struct error_category final : std::error_category {
             return "Schema not found";
         case error_code::schema_invalid:
             return "Invalid schema";
+        case error_code::schema_incompatible:
+            return "Schema being registered is incompatible with an earlier "
+                   "schema for subject";
         case error_code::subject_not_found:
             return "Subject not found";
         case error_code::subject_version_not_found:
             return "Subject version not found";
         case error_code::subject_soft_deleted:
-            return "Subject was soft deleted. Set permanent=true to delete "
+            return "Subject was soft deleted.Set permanent=true to delete "
                    "permanently";
         case error_code::subject_not_deleted:
             return "Subject not deleted before being permanently deleted";
         case error_code::subject_version_soft_deleted:
-            return "Version was soft deleted. Set permanent=true to delete "
+            return "Version was soft deleted.Set permanent=true to delete "
                    "permanently";
         case error_code::subject_version_not_deleted:
             return "Version not deleted before being permanently deleted";
+        case error_code::subject_schema_invalid:
+            return "Error while looking up schema under subject";
+        case error_code::write_collision:
+            return "Too many retries on write collision";
         case error_code::topic_parse_error:
             return "Unexpected data found in topic";
         }
@@ -52,10 +59,12 @@ struct error_category final : std::error_category {
     std::error_condition
     default_error_condition(int ec) const noexcept override {
         switch (static_cast<error_code>(ec)) {
-        case error_code::schema_id_not_found:
         case error_code::subject_not_found:
-        case error_code::subject_version_not_found:
             return reply_error_code::topic_not_found; // 40401
+        case error_code::subject_version_not_found:
+            return reply_error_code::partition_not_found; // 40402
+        case error_code::schema_id_not_found:
+            return reply_error_code::consumer_instance_not_found; // 40403
         case error_code::subject_soft_deleted:
             return reply_error_code::subject_soft_deleted; // 40404
         case error_code::subject_not_deleted:
@@ -64,8 +73,14 @@ struct error_category final : std::error_category {
             return reply_error_code::subject_version_soft_deleted; // 40406
         case error_code::subject_version_not_deleted:
             return reply_error_code::subject_version_not_deleted; // 40407
+        case error_code::subject_schema_invalid:
+            return reply_error_code::internal_server_error; // 500
+        case error_code::write_collision:
+            return reply_error_code::write_collision; // 50301
         case error_code::schema_invalid:
             return reply_error_code::unprocessable_entity;
+        case error_code::schema_incompatible:
+            return reply_error_code::conflict; // 409
         case error_code::topic_parse_error:
             return reply_error_code::zookeeper_error; // 50001
         }

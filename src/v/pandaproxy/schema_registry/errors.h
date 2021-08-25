@@ -54,6 +54,11 @@ inline void outcome_throw_as_system_error_with_payload(const error_info& ei) {
 template<typename T>
 using result = result<T, error_info>;
 
+inline error_info schema_not_found() {
+    return error_info{
+      error_code::schema_id_not_found, fmt::format("Schema not found")};
+}
+
 inline error_info not_found(schema_id id) {
     return error_info{
       error_code::schema_id_not_found,
@@ -66,17 +71,17 @@ inline error_info not_found(const subject& sub) {
       fmt::format("Subject '{}' not found.", sub())};
 }
 
-inline error_info not_found(const subject& sub, schema_version id) {
+inline error_info not_found(const subject&, schema_version id) {
     return error_info{
       error_code::subject_version_not_found,
-      fmt::format("Subject '{}' Version {} not found.", sub(), id())};
+      fmt::format("Version {} not found.", id())};
 }
 
 inline error_info soft_deleted(const subject& sub) {
     return error_info{
       error_code::subject_soft_deleted,
       fmt::format(
-        "Subject '{}' was soft deleted. Set permanent=true to delete "
+        "Subject '{}' was soft deleted.Set permanent=true to delete "
         "permanently",
         sub())};
 }
@@ -93,7 +98,7 @@ inline error_info soft_deleted(const subject& sub, schema_version version) {
     return error_info{
       error_code::subject_version_soft_deleted,
       fmt::format(
-        "Subject '{}' Version {} was soft deleted. Set permanent=true to "
+        "Subject '{}' Version {} was soft deleted.Set permanent=true to "
         "delete permanently",
         sub(),
         version())};
@@ -107,6 +112,18 @@ inline error_info not_deleted(const subject& sub, schema_version version) {
         "permanently deleted",
         sub(),
         version())};
+}
+
+inline error_info invalid_schema_type(schema_type type) {
+    return {
+      error_code::schema_invalid,
+      fmt::format("Invalid schema type {}", to_string_view(type))};
+}
+
+inline error_info invalid_subject_schema(const subject& sub) {
+    return {
+      error_code::subject_schema_invalid,
+      fmt::format("Error while looking up schema under subject {}", sub())};
 }
 
 } // namespace pandaproxy::schema_registry

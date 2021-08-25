@@ -81,6 +81,7 @@ struct follower_index_metadata {
     // timestamp of last append_entries_rpc call
     clock_type::time_point last_append_timestamp;
     clock_type::time_point last_hbeat_timestamp;
+    uint32_t heartbeats_failed{0};
     // The pair of sequences used to track append entries requests sent and
     // received by the follower. Every time append entries request is created
     // the `last_sent_seq` is incremented before accessing raft protocol state
@@ -148,10 +149,11 @@ struct follower_index_metadata {
      */
     ss::condition_variable follower_state_change;
     /**
-     * We prevent race conditions accessing suppress_heartbeats flag using the
-     * `last_sent_seq` value for version control.
+     * We prevent race conditions accessing suppress_heartbeats with MVCC based
+     * on last_suppress_heartbeats_seq field.
      */
     heartbeats_suppressed suppress_heartbeats = heartbeats_suppressed::no;
+    follower_req_seq last_suppress_heartbeats_seq{0};
 };
 /**
  * class containing follower statistics, this may be helpful for debugging,
@@ -457,6 +459,18 @@ struct timeout_now_reply {
 
     model::term_id term;
     status result;
+};
+
+// if not target is specified then the most up-to-date node will be selected
+struct transfer_leadership_request {
+    group_id group;
+    std::optional<model::node_id> target;
+    raft::group_id target_group() const { return group; }
+};
+
+struct transfer_leadership_reply {
+    bool success{false};
+    raft::errc result;
 };
 
 // key types used to store data in key-value store
