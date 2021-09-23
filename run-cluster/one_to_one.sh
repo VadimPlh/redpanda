@@ -8,7 +8,7 @@ producer="./kafka_2.13-2.8.0/bin/kafka-producer-perf-test.sh"
 
 SCRIPTS_COUNT=100
 
-MESSAGES_COUNT=2000000000
+MESSAGES_COUNT=20000000
 MESSAGES_SIZE=520
 
 rm -rf $SCRIPTS_DIR_PATH
