@@ -8,17 +8,19 @@ INPUT_TOPIC="input"
 DATA_DIR="./cluster/redpanda-node-0/data/kafka"
 OUTPUT_TOPIC="output_"
 
-MESSAGES_COUNT=100000
-MESSAGES_SIZE=26000
+producer="./kafka_2.13-3.0.0/bin/kafka-producer-perf-test.sh"
+
+MESSAGES_COUNT=20000000
+MESSAGES_SIZE=520
 
 SCRIPTS_COUNT=10
 
 rm -rf $SCRIPTS_DIR_PATH
 mkdir $SCRIPTS_DIR_PATH
 
-$RPK_PATH topic create ${INPUT_TOPIC}
+$RPK_PATH topic create ${INPUT_TOPIC} -p 32 -r 3
 
-for i in {1..5}
+for i in {1..100}
 do
     rm -rf $DIR_PATH
     mkdir $DIR_PATH
@@ -43,11 +45,31 @@ do
     $RPK_PATH wasm deploy --name "${INPUT_TOPIC}_${i}" $SCRIPTS_DIR_PATH/script_${i}.js
 done
 
-./rdkafka_perfomance -P -t "${INPUT_TOPIC}" -s ${MESSAGES_SIZE} -b 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 -m "qwertyuiopasdfghjklzxcvbnm" -c ${MESSAGES_COUNT}
+$producer --topic "${INPUT_TOPIC}" --payload-file message.txt --producer-props asks=-1 bootstrap.servers=127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 --throughput -1 --num-records ${MESSAGES_COUNT}
 
-for i in {1..5}
+for i in {1..100}
 do
-    ./rdkafka_perfomance -C -t "${INPUT_TOPIC}.\$${OUTPUT_TOPIC}${i}\$"  -b 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 -p 0_11 -c ${MESSAGES_COUNT}
+    flag=0
+    input_result=`${RPK_PATH} topic describe ${INPUT_TOPIC} -p |  awk '{ print $7 }'`
+    for j in {1..10}
+    do
+        name="${INPUT_TOPIC}."'$output'"_${i}"'$'
+        result=`${RPK_PATH} topic describe ${name} -p |  awk '{ print $7 }'`
+        result=${result//UNKNOWN_TOPIC_OR_PARTITION/0}
+
+        if [ "$result" == "$input_result" ]
+        then
+            flag=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$flag" == 0 ]
+    then
+        echo "FAILFAILFAILFAILFAILFAIL"
+        exit 1
+    fi
 
     rm -rf rpk_log.txt
     $RPK_PATH topic consume ${INPUT_TOPIC}.\$${OUTPUT_TOPIC}${i}\$ &> rpk_log.txt &
