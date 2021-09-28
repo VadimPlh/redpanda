@@ -1,0 +1,46 @@
+organization: "vectorized"
+cluster_id: "cluster0"
+
+redpanda:
+  developer_mode: true
+  data_directory: "/home/fedora/data/redpanda/run-cluster/cluster/redpanda-node-1/data"
+  node_id: 1
+  rpc_server:
+    address: "0.0.0.0"
+    port: 33146
+  kafka_api:
+    address: "0.0.0.0"
+    port: 9093
+  admin:
+    address: "0.0.0.0"
+    port: 9645
+
+  coproc_supervisor_server:
+    address: "0.0.0.0"
+    port: 43190
+
+  auto_create_topics_enabled: true
+  default_topic_partitions: 3
+  default_topic_replications: 3
+  enable_coproc: true
+
+  seed_servers:
+    - host:
+        address: "127.0.0.1"
+        port: 33145
+      node_id: 0
+
+rpk:
+  enable_usage_stats: false
+  tune_network: false
+  tune_disk_scheduler: false
+  tune_disk_nomerges: false
+  tune_disk_irq: false
+  tune_fstrim: false
+  tune_cpu: false
+  tune_aio_events: false
+  tune_clocksource: false
+  tune_swappiness: false
+  enable_memory_locking: false
+  tune_coredump: false
+  coredump_dir: "/home/fedora/data/redpanda/run-cluster/cluster/redpanda-node-1/coredump"
