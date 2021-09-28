@@ -1,0 +1,7 @@
+#!/bin/bash
+
+export COPROC_COUNT=5
+export RECORD_SIZE=1000
+export THROUGHPUT=10000
+
+export MESSAGES_COUNT=100000
