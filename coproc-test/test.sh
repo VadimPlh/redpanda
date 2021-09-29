@@ -15,25 +15,25 @@ consumer="./kafka_2.12-3.0.0/bin/kafka-consumer-perf-test.sh"
 rm -rf $SCRIPTS_DIR_PATH
 mkdir $SCRIPTS_DIR_PATH
 
+rm -rf $GENERATE_DIR_PATH
+mkdir $GENERATE_DIR_PATH
+$RPK_PATH wasm generate $GENERATE_DIR_PATH
+cp template_code.js $GENERATE_DIR_PATH/src/main.js
+
+cd $GENERATE_DIR_PATH
+npm install
+npm run build
+cd ..
+
+cp $GENERATE_DIR_PATH/dist/main.js $SCRIPTS_DIR_PATH/template.js
+
 for (( i=0; i < ${COPROC_COUNT}; i++ ))
 do
-    rm -rf $GENERATE_DIR_PATH
-    mkdir $GENERATE_DIR_PATH
+    template=`cat ${SCRIPTS_DIR_PATH}/template.js`
 
-    $RPK_PATH wasm generate $GENERATE_DIR_PATH
+    new_code=${template//_input/one_to_one_${i}}
 
-    template=`cat template_code.js`
-
-    new_code=${template//input/one_to_one_${i}}
-
-    echo "$new_code" > $GENERATE_DIR_PATH/src/main.js
-
-    cd $GENERATE_DIR_PATH
-    npm install
-    npm run build
-    cd ..
-
-    cp $GENERATE_DIR_PATH/dist/main.js $SCRIPTS_DIR_PATH/script_${i}.js
+    echo "$new_code" > $SCRIPTS_DIR_PATH/script_${i}.js
 
     # Deploy
     $RPK_PATH topic create one_to_one_${i} -p ${PARTITIONS} -r 3

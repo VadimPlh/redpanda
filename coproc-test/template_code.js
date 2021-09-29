@@ -5,7 +5,7 @@ const {
   } = require("@vectorizedio/wasm-api");
   const transform = new SimpleTransform();
   /* Topics that fire the transform function */
-  transform.subscribe([["input", PolicyInjection.Stored]]);
+  transform.subscribe([["_input", PolicyInjection.Stored]]);
   /* The strategy the transform engine will use when handling errors */
   transform.errorHandler(PolicyError.SkipOnFailure);
   /* Auxiliar transform function for records */
