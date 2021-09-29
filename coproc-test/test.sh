@@ -52,7 +52,7 @@ rm -rf ${CONSUMER_DIR}
 mkdir ${CONSUMER_DIR}
 for (( i=0; i < ${COPROC_COUNT}; i++ ))
 do
-    $consumer --topic "one_to_one_${i}."'$output$' --bootstrap-server 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 --messages ${MESSAGES_COUNT} &> ${CONSUMER_DIR}/consumer_${i}.txt &
+    $consumer --topic "one_to_one_${i}."'$output$' --bootstrap-server 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 --messages ${MESSAGES_COUNT} &> ${CONSUMER_DIR}/consumer_${i}.txt --timeout ${TIMEOUT} &
 done
 
 
