@@ -7,3 +7,5 @@ export PARTITIONS=32
 export TIMEOUT=120000
 
 export MESSAGES_COUNT=500000
+
+export BROKERS=""

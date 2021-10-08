@@ -36,8 +36,8 @@ do
     echo "$new_code" > $SCRIPTS_DIR_PATH/script_${i}.js
 
     # Deploy
-    $RPK_PATH topic create one_to_one_${i} -p ${PARTITIONS} -r 3
-    $RPK_PATH wasm deploy --name "one_to_one_${i}" $SCRIPTS_DIR_PATH/script_${i}.js
+    $RPK_PATH topic create one_to_one_${i} -p ${PARTITIONS} -r 3 --brokers ${BROKERS}
+    $RPK_PATH wasm deploy --name "one_to_one_${i}" $SCRIPTS_DIR_PATH/script_${i}.js --brokers ${BROKERS}
 done
 
 rm -rf ${PRODUCER_DIR}
@@ -45,14 +45,14 @@ mkdir ${PRODUCER_DIR}
 
 for (( i=0; i < ${COPROC_COUNT}; i++ ))
 do
-    $producer --topic "one_to_one_${i}" --record-size ${RECORD_SIZE} --producer-props asks=-1   bootstrap.servers=127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 --throughput ${THROUGHPUT} --num-records $MESSAGES_COUNT &> ${PRODUCER_DIR}/producer_${i}.txt &
+    $producer --topic "one_to_one_${i}" --record-size ${RECORD_SIZE} --producer-props asks=-1   bootstrap.servers=${BROKERS} --throughput ${THROUGHPUT} --num-records $MESSAGES_COUNT &> ${PRODUCER_DIR}/producer_${i}.txt &
 done
 
 rm -rf ${CONSUMER_DIR}
 mkdir ${CONSUMER_DIR}
 for (( i=0; i < ${COPROC_COUNT}; i++ ))
 do
-    $consumer --topic "one_to_one_${i}."'$output$' --bootstrap-server 127.0.0.1:9092,127.0.0.1:9093,127.0.0.1:9094 --messages ${MESSAGES_COUNT} &> ${CONSUMER_DIR}/consumer_${i}.txt --timeout ${TIMEOUT} &
+    $consumer --topic "one_to_one_${i}."'$output$' --bootstrap-server ${BROKERS} --messages ${MESSAGES_COUNT} &> ${CONSUMER_DIR}/consumer_${i}.txt --timeout ${TIMEOUT} &
 done
 
 
