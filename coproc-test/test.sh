@@ -1,0 +1,58 @@
+#!/bin/bash
+
+. ./config.sh
+
+RPK_PATH="../vbuild/go/linux/bin/rpk"
+GENERATE_DIR_PATH="./test"
+SCRIPTS_DIR_PATH="./scripts"
+
+PRODUCER_DIR="./producer_log"
+CONSUMER_DIR="./consumer_log"
+
+producer="./kafka_2.12-3.0.0/bin/kafka-producer-perf-test.sh"
+consumer="./kafka_2.12-3.0.0/bin/kafka-consumer-perf-test.sh"
+
+rm -rf $SCRIPTS_DIR_PATH
+mkdir $SCRIPTS_DIR_PATH
+
+rm -rf $GENERATE_DIR_PATH
+mkdir $GENERATE_DIR_PATH
+$RPK_PATH wasm generate $GENERATE_DIR_PATH
+cp template_code.js $GENERATE_DIR_PATH/src/main.js
+
+cd $GENERATE_DIR_PATH
+npm install
+npm run build
+cd ..
+
+cp $GENERATE_DIR_PATH/dist/main.js $SCRIPTS_DIR_PATH/template.js
+
+for (( i=0; i < ${COPROC_COUNT}; i++ ))
+do
+    template=`cat ${SCRIPTS_DIR_PATH}/template.js`
+
+    new_code=${template//_input/one_to_one_${i}}
+
+    echo "$new_code" > $SCRIPTS_DIR_PATH/script_${i}.js
+
+    # Deploy
+    $RPK_PATH topic create one_to_one_${i} -p ${PARTITIONS} -r 3 --brokers ${BROKERS}
+    $RPK_PATH wasm deploy --name "one_to_one_${i}" $SCRIPTS_DIR_PATH/script_${i}.js --brokers ${BROKERS}
+done
+
+rm -rf ${PRODUCER_DIR}
+mkdir ${PRODUCER_DIR}
+
+for (( i=0; i < ${COPROC_COUNT}; i++ ))
+do
+    $producer --topic "one_to_one_${i}" --record-size ${RECORD_SIZE} --producer-props asks=-1   bootstrap.servers=${BROKERS} --throughput ${THROUGHPUT} --num-records $MESSAGES_COUNT &> ${PRODUCER_DIR}/producer_${i}.txt &
+done
+
+rm -rf ${CONSUMER_DIR}
+mkdir ${CONSUMER_DIR}
+for (( i=0; i < ${COPROC_COUNT}; i++ ))
+do
+    $consumer --topic "one_to_one_${i}."'$output$' --bootstrap-server ${BROKERS} --messages ${MESSAGES_COUNT} &> ${CONSUMER_DIR}/consumer_${i}.txt --timeout ${TIMEOUT} &
+done
+
+
