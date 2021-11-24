@@ -127,10 +127,47 @@
                             "type": "integer"
                         },
                         {
-                            "name":"target",
-                            "in":"query",
-                            "required":false,
-                            "type":"integer"
+                            "name": "target",
+                            "in": "query",
+                            "required": false,
+                            "type": "integer"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "path": "/v1/partitions/{namespace}/{topic}/{partition}/transactions",
+            "operations": [
+                {
+                    "method": "POST",
+                    "summary": "Get transaction for partition",
+                    "type": "array",
+                    "items": {
+                        "type": "transaction"
+                    },
+                    "nickname": "get_transactions",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "namespace",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "topic",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "partition",
+                            "in": "path",
+                            "required": true,
+                            "type": "integer"
                         }
                     ]
                 }
@@ -208,6 +245,50 @@
                         "type": "assignment"
                     },
                     "description": "Replica assignments"
+                }
+            }
+        },
+        "producer_identity": {
+            "id": "producer_identity",
+            "description": "Rroducer identity details",
+            "properties": {
+                "id": {
+                    "type": "long",
+                    "description": "id"
+                },
+                "epoch": {
+                    "type": "long",
+                    "description": "epoch"
+                }
+            }
+        },
+        "transaction": {
+            "id": "transaction",
+            "description": "Transaction details",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "transactional id"
+                },
+                "pid": {
+                    "type": "producer_identity",
+                    "description": "Producer identity"
+                },
+                "tx_seq": {
+                    "type": "long",
+                    "description": "tx seq"
+                },
+                "etag": {
+                    "type": "long",
+                    "description": "term id"
+                },
+                "timeout_ms": {
+                    "type": "long",
+                    "description": "Timeout for transaction(ms)"
+                },
+                "last_update_ts": {
+                    "type": "string",
+                    "description": "Last update time"
                 }
             }
         }
