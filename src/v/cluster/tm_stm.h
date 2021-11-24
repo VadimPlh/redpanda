@@ -171,6 +171,11 @@ public:
 
     std::vector<kafka::transactional_id> get_expired_txs();
 
+    const absl::flat_hash_map<kafka::transactional_id, tm_transaction>
+    get_txs() {
+        return _tx_table;
+    }
+
 protected:
     ss::future<> handle_eviction() override;
 
