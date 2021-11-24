@@ -1247,6 +1247,74 @@ void admin_server::register_partition_routes() {
           co_await throw_on_error(*req, err, model::controller_ntp);
           co_return ss::json::json_void();
       });
+
+    /*
+     * Get a list of transactions for partition.
+     */
+    ss::httpd::partition_json::get_transactions.set(
+      _server._routes,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          auto ns = model::ns(req->param["namespace"]);
+          auto topic = model::topic(req->param["topic"]);
+
+          model::partition_id partition;
+          try {
+              partition = model::partition_id(
+                std::stoi(req->param["partition"]));
+          } catch (...) {
+              throw ss::httpd::bad_param_exception(fmt::format(
+                "Partition id must be an integer: {}",
+                req->param["partition"]));
+          }
+
+          if (partition() < 0) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Invalid partition id {}", partition));
+          }
+
+          const model::ntp ntp(std::move(ns), std::move(topic), partition);
+
+          auto shard = _shard_table.local().shard_for(ntp);
+          if (!shard) {
+              // This node is not a member of the raft group, redirect.
+              throw co_await redirect_to_leader(*req, ntp);
+          }
+
+          co_return co_await _partition_manager.invoke_on(
+            *shard,
+            [ntp = ntp,
+             req = std::move(req)](cluster::partition_manager& pm) mutable
+            -> ss::future<ss::json::json_return_type> {
+                auto partition = pm.get(ntp);
+                if (!partition) {
+                    throw ss::httpd::not_found_exception();
+                }
+
+                auto transactions = partition->tm_stm()->get_txs();
+
+                using transaction_info = ss::httpd::partition_json::transaction;
+                std::vector<transaction_info> res;
+                for (auto& [tx_id, transaction] : transactions) {
+                    transaction_info tx_info;
+                    tx_info.id = tx_id;
+                    ss::httpd::partition_json::producer_identity pd;
+                    pd.id = transaction.pid.id;
+                    pd.epoch = transaction.pid.epoch;
+                    tx_info.pid = pd;
+                    tx_info.tx_seq = transaction.tx_seq;
+                    tx_info.etag = transaction.etag;
+                    tx_info.timeout_ms = transaction.timeout_ms.count();
+                    auto time_in_time_t = ss::lowres_system_clock::to_time_t(
+                      transaction.last_update_ts);
+                    auto string_time = boost::lexical_cast<std::string>(time_in_time_t);
+                    tx_info.last_update_ts = string_time;
+                    res.emplace_back(std::move(tx_info));
+                }
+
+                co_return ss::json::json_return_type(res);
+            });
+      });
 }
 
 void admin_server::register_hbadger_routes() {
