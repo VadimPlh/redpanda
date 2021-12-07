@@ -74,6 +74,7 @@ public:
     ss::sharded<cluster::shard_table> shard_table;
     ss::sharded<storage::api> storage;
     std::unique_ptr<coproc::api> coprocessing;
+    std::unique_ptr<v8_engine::api> v8_api;
     ss::sharded<cluster::partition_manager> partition_manager;
     ss::sharded<raft::recovery_throttle> recovery_throttle;
     ss::sharded<raft::group_manager> raft_group_manager;
@@ -92,7 +93,6 @@ public:
     ss::sharded<kafka::rm_group_frontend> rm_group_frontend;
     ss::sharded<cluster::rm_partition_frontend> rm_partition_frontend;
     ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
-    ss::sharded<v8_engine::data_policy_table> data_policies;
     ss::sharded<cloud_storage::cache> shadow_index_cache;
 
 private:
@@ -146,6 +146,8 @@ private:
     std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;
     ss::sharded<archival::upload_controller> _archival_upload_controller;
+
+    std::unique_ptr<coproc::wasm::event_listener> _wasm_event_listener;
 
     ss::metrics::metric_groups _metrics;
     std::unique_ptr<kafka::rm_group_proxy_impl> _rm_group_proxy;

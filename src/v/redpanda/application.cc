@@ -31,6 +31,7 @@
 #include "config/node_config.h"
 #include "config/seed_server.h"
 #include "coproc/api.h"
+#include "coproc/event_listener.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
 #include "kafka/server/group_manager.h"
@@ -59,6 +60,7 @@
 #include "test_utils/logs.h"
 #include "utils/file_io.h"
 #include "utils/human.h"
+#include "v8_engine/api.h"
 #include "v8_engine/data_policy_table.h"
 #include "version.h"
 #include "vlog.h"
@@ -649,9 +651,14 @@ void application::wire_up_redpanda_services() {
       .get();
     vlog(_log.info, "Partition manager started");
 
-    // controller
+    if (coproc_enabled() || v8_engine::api::is_enabled()) {
+        _wasm_event_listener = std::make_unique<coproc::wasm::event_listener>();
+    }
 
-    construct_service(data_policies).get();
+    construct_single_service(v8_api);
+    v8_api->start(ss::engine().alien(), _wasm_event_listener.get()).get();
+
+    // controller
 
     syschecks::systemd_message("Creating cluster::controller").get();
 
@@ -663,7 +670,7 @@ void application::wire_up_redpanda_services() {
       shard_table,
       storage,
       std::ref(raft_group_manager),
-      data_policies);
+      std::ref(*v8_api.get()));
 
     controller->wire_up().get0();
     syschecks::systemd_message("Creating kafka metadata cache").get();
@@ -788,8 +795,19 @@ void application::wire_up_redpanda_services() {
           std::ref(controller->get_topics_frontend()),
           std::ref(metadata_cache),
           std::ref(partition_manager));
-        coprocessing->start().get();
+        coprocessing->start(*_wasm_event_listener).get();
     }
+
+    if (_wasm_event_listener.get() != nullptr) {
+        _wasm_event_listener->start().get();
+    }
+
+    // We need to stop event_listener before coproc.
+    _deferred.emplace_back([this] {
+        if (_wasm_event_listener.get() != nullptr) {
+            _wasm_event_listener->stop().get();
+        }
+    });
 
     // metrics and quota management
     syschecks::systemd_message("Adding kafka quota manager").get();
@@ -1153,7 +1171,7 @@ void application::start_redpanda() {
             controller->get_security_frontend(),
             controller->get_api(),
             tx_gateway_frontend,
-            data_policies,
+            *v8_api,
             qdc_config);
           s.set_protocol(std::move(proto));
       })

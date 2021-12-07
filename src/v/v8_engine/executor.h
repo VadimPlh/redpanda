@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include "coproc/types.h"
 #include "seastarx.h"
 #include "utils/concepts-enabled.h"
 #include "utils/gate_guard.h"
@@ -21,9 +22,10 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/internal/pollable_fd.hh>
 #include <seastar/core/lowres_clock.hh>
+#include <seastar/core/sharded.hh>
 #include <seastar/core/smp.hh>
-#include <seastar/util/later.hh>
 
+#include <absl/container/node_hash_map.h>
 #include <boost/lockfree/spsc_queue.hpp>
 
 #include <atomic>
@@ -223,6 +225,44 @@ private:
     ss::timer<ss::lowres_clock> _watchdog;
 
     ss::shard_id _watchdog_shard;
+};
+
+// This class implements wrapper for executor.
+// In current design executor exist on one core
+// And for submit tasks you need to run invoke_on
+// So this class wrap this logic for v8_engine::script, because we want to
+// change executor easy and use only one method = submit
+class executor_service {
+    static constexpr size_t _home_core = 0;
+    static constexpr size_t _core_for_executor_thread = 0;
+
+public:
+    ss::future<> start(ss::alien::instance& instance, int64_t size);
+    ss::future<> stop();
+
+    template<typename WrapperFuncForExecutor>
+    ss::future<> submit(
+      WrapperFuncForExecutor func_for_executor,
+      std::chrono::milliseconds timeout) {
+        return _executor.invoke_on(
+          _home_core,
+          [func_for_executor = std::move(func_for_executor),
+           timeout](executor& exec) mutable {
+              return exec.submit(std::move(func_for_executor), timeout);
+          });
+    }
+
+    ss::future<> insert_or_assign(coproc::script_id id, iobuf code);
+
+    ss::future<> erase(coproc::script_id id);
+
+    ss::future<std::optional<iobuf>> get_code(std::string_view name);
+
+private:
+    ss::sharded<executor> _executor;
+
+    using code_database_t = absl::node_hash_map<coproc::script_id, iobuf>;
+    ss::sharded<code_database_t> _code_database;
 };
 
 } // namespace v8_engine
