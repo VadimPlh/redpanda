@@ -20,7 +20,7 @@
   // Version 1 is the same as version 0.
   //
   // Version 2 adds the committed leader epoch.
-  "validVersions": "0-2",
+  "validVersions": "0-3",
   "flexibleVersions": "none",
   "fields": [
     { "name": "TransactionalId", "type": "string", "versions": "0+",
@@ -31,6 +31,15 @@
       "about": "The current producer ID in use by the transactional ID." },
     { "name": "ProducerEpoch", "type": "int16", "versions": "0+",
       "about": "The current epoch associated with the producer ID." },
+    { "name": "GenerationId", "type": "int32", "versions": "3+", "default": "-1",
+      "about": "GenerationId"
+    },
+    { "name": "MemberId", "type": "string", "versions": "3+",
+      "about": "MemberId"
+    },
+    { "name": "GroupInstanceId", "type": "string", "versions": "3+", "nullableVersions": "0+",
+      "about": "GroupInstanceId"
+    },
     { "name": "Topics", "type" : "[]TxnOffsetCommitRequestTopic", "versions": "0+",
       "about": "Each topic that we want to committ offsets for.", "fields": [
       { "name": "Name", "type": "string", "versions": "0+", "entityType": "topicName",
