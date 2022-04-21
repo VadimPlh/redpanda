@@ -11,6 +11,7 @@
 
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
+#include "kafka/protocol/schemata/flex_versions.h"
 
 #include <seastar/core/temporary_buffer.hh>
 
@@ -37,8 +38,11 @@ parse_header(ss::input_stream<char>& src) {
     header.key = api_key(reader.read_int16());
     header.version = api_version(reader.read_int16());
     header.correlation = correlation_id(reader.read_int32());
-    auto client_id_size = reader.read_int16();
 
+    // There is a contradiction here with the proposed flexible header
+    // introduced in KIP-482. The KIP details how client_id will be a compact
+    // string, however this is not the case
+    auto client_id_size = reader.read_int16();
     if (client_id_size == 0) {
         header.client_id = std::string_view();
         co_return header;
@@ -64,7 +68,45 @@ parse_header(ss::input_stream<char>& src) {
     header.client_id = std::string_view(
       header.client_id_buffer.get(), header.client_id_buffer.size());
     validate_utf8(*header.client_id);
+
+    /// Conditionally handle v1 (flex) header
+    if (unlikely(!flex_versions::is_api_in_schema(header.key))) {
+        /// User provided unknown header do nothing, eventually code will flow
+        /// to return non-supported request error
+    } else if (flex_versions::is_flexible_request(header.key, header.version)) {
+        auto [tags, bytes_read] = co_await parse_tags(src);
+        header.tags = std::move(tags);
+        header.tags_size_bytes = bytes_read;
+    }
     co_return header;
+}
+
+ss::future<std::pair<std::optional<tagged_fields>, size_t>>
+parse_tags(ss::input_stream<char>& src) {
+    size_t total_bytes_read = 0;
+    auto read_unsigned_vint =
+      [&total_bytes_read](ss::input_stream<char>& src) -> ss::future<uint32_t> {
+        auto [n, bytes_read] = co_await unsigned_vint::stream_deserialize(src);
+        total_bytes_read += bytes_read;
+        co_return n;
+    };
+
+    tagged_fields tags;
+
+    auto num_tags = co_await read_unsigned_vint(src);
+    while (num_tags-- > 0) {
+        auto tag_id = co_await read_unsigned_vint(src);
+        auto next_len = co_await read_unsigned_vint(src);
+        std::optional<iobuf> data;
+        if (next_len > 0) {
+            data = iobuf();
+            auto buf = co_await src.read_exactly(next_len - 1);
+            data->append(std::move(buf));
+            total_bytes_read += (next_len - 1);
+        }
+        tags.emplace_back(tag_id, std::move(data));
+    }
+    co_return std::make_pair(std::move(tags), total_bytes_read);
 }
 
 size_t parse_size_buffer(ss::temporary_buffer<char> buf) {
@@ -91,14 +133,26 @@ ss::scattered_message<char> response_as_scattered(response_ptr response) {
      * response header:
      *   - int32_t: size (correlation + response size)
      *   - int32_t: correlation
+     *   - std::vector<vint, optional<iobuf>>: tagged fields
      */
-    ss::temporary_buffer<char> b;
+    iobuf tags_header;
+    if (response->is_flexible() && response->tags()) {
+        response_writer writer(tags_header);
+        writer.write_tags(std::move(*response->tags()));
+    }
     const auto size = static_cast<int32_t>(
-      sizeof(response->correlation()) + response->buf().size_bytes());
+      sizeof(response->correlation()) + tags_header.size_bytes()
+      + response->buf().size_bytes());
     iobuf header;
     response_writer writer(header);
     writer.write(size);
     writer.write(response->correlation());
+    if (tags_header.size_bytes() > 0) {
+        // Currently sending tags to client is an unused feature however if the
+        // request is flexible at least a single 0 byte must be written to be
+        // compliant with the protocol
+        header.append(std::move(tags_header));
+    }
 
     auto& buf = response->buf();
     buf.prepend(std::move(header));

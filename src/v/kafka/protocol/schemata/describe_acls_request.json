@@ -19,7 +19,7 @@
   "name": "DescribeAclsRequest",
   // Version 1 adds resource pattern type.
   "validVersions": "0-1",
-  "flexibleVersions": "none",
+  "flexibleVersions": "2+",
   "fields": [
     { "name": "ResourceType", "type": "int8", "versions": "0+",
       "about": "The resource type." },

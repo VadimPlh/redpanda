@@ -28,7 +28,7 @@
   //
   // Version 5 is the same as version 5.
   "validVersions": "0-5",
-  "flexibleVersions": "none",
+  "flexibleVersions": "6+",
   "fields": [
     { "name": "ReplicaId", "type": "int32", "versions": "0+", "entityType": "brokerId",
       "about": "The broker ID of the requestor, or -1 if this request is being made by a normal consumer." },
