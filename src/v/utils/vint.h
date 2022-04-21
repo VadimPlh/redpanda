@@ -97,4 +97,53 @@ inline std::pair<int64_t, size_t> deserialize(Range&& r) noexcept {
     return {decode_zigzag(result), bytes_read};
 }
 
+template<typename Range>
+inline std::pair<int64_t, size_t> deserialize_without_zigzag(Range&& r) noexcept {
+    uint64_t result = 0;
+    size_t bytes_read = 0;
+    uint64_t shift = 0;
+    for (auto src = r.begin(); shift <= 63 && src != r.end(); ++src) {
+        uint64_t byte = *src;
+        bytes_read++;
+        if (byte & 128) {
+            result |= ((byte & 127) << shift);
+        } else {
+            result |= byte << shift;
+            break;
+        }
+        shift += 7;
+    }
+    return {result, bytes_read};
+}
+
+inline size_t serialize_without_zigzag(const int64_t x, uint8_t* out) noexcept {
+    // *must* be named differently from input
+    uint64_t value = static_cast<uint64_t>(x);
+    size_t bytes_used = 0;
+    if (value < 0x80) {
+        out[bytes_used++] = static_cast<uint8_t>(value);
+        return bytes_used;
+    }
+    out[bytes_used++] = static_cast<uint8_t>(value | 0x80);
+    value >>= 7;
+    if (value < 0x80) {
+        out[bytes_used++] = static_cast<uint8_t>(value);
+        return bytes_used;
+    }
+    do {
+        out[bytes_used++] = static_cast<uint8_t>(value | 0x80);
+        value >>= 7;
+    } while (unlikely(value >= 0x80));
+    out[bytes_used++] = static_cast<uint8_t>(value);
+    return bytes_used;
+}
+inline bytes to_bytes_without_zigag(int64_t value) noexcept {
+    // our bytes uses a short-string optimization of 31 bytes
+    auto out = ss::uninitialized_string<bytes>(max_length);
+    auto sz = serialize_without_zigzag(value, out.data());
+    out.resize(sz);
+    return out;
+}
+
+
 } // namespace vint
