@@ -88,7 +88,7 @@ foreach(schema ${schemata})
     OUTPUT ${hdr} ${src}
     COMMAND ${KAFKA_CODEGEN_VENV} ${CMAKE_CURRENT_SOURCE_DIR}/generator.py
     ARGS ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/${schema}
-    DEPENDS ${schema} ${CMAKE_CURRENT_SOURCE_DIR}/generator.py ${KAFKA_CODEGEN_VENV}
+    DEPENDS ${schema} ${CMAKE_CURRENT_SOURCE_DIR}/generator.py ${KAFKA_CODEGEN_VENV} flex_versions.h
     COMMENT "Running kafka request codegen on ${schema}"
     VERBATIM)
 endforeach()
