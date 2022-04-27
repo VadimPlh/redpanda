@@ -69,6 +69,15 @@ set(schemata
   offset_for_leader_epoch_response.json)
 
 set(srcs)
+list(APPEND srcs flex_versions.h)
+add_custom_command(
+  OUTPUT flex_versions.h
+  COMMAND ${KAFKA_CODEGEN_VENV} ${CMAKE_CURRENT_SOURCE_DIR}/flex_api_version_generator.py
+  ARGS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} flex_versions ${schemata}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/flex_api_version_generator.py
+  COMMENT "Running kafka flex request codegen on ${schemata}"
+  VERBATIM)
+
 foreach(schema ${schemata})
   get_filename_component(msg_name ${schema} NAME_WE)
   set(hdr "${CMAKE_CURRENT_BINARY_DIR}/${msg_name}.h")
