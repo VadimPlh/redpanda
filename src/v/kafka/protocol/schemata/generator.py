@@ -413,6 +413,8 @@ STRUCT_TYPES = [
     "OffsetForLeaderPartition",
     "OffsetForLeaderTopicResult",
     "EpochEndOffset",
+    "SupportedFeatureKey",
+    "FinalizedFeatureKey",
 ]
 
 SCALAR_TYPES = list(basic_type_map.keys())
@@ -1221,6 +1223,7 @@ SCHEMA = {
             ],
         },
         "fields": {"$ref": "#/definitions/fields"},
+        "listeners": { "type": "array", "optional": True }
     },
     "required": [
         "apiKey",
