@@ -51,6 +51,12 @@ public:
         return {val, length_size};
     }
 
+    std::pair<int64_t, uint8_t> read_varlong_without_zigzag() {
+        auto [val, length_size] = vint::deserialize_without_zigzag(_in);
+        _in.skip(length_size);
+        return {val, length_size};
+    }
+
     ss::sstring read_string(size_t len) {
         ss::sstring str = ss::uninitialized_string(len);
         _in.consume_to(str.size(), str.begin());

@@ -48,7 +48,7 @@ class response_writer {
     }
 
     uint32_t serialize_vint(int64_t val) {
-        auto x = vint::to_bytes(val);
+        auto x = vint::to_bytes_without_zigag(val);
         _out->append(x.data(), x.size());
         return x.size();
     }
@@ -78,6 +78,10 @@ public:
     uint32_t write(const model::timestamp ts) { return write(ts()); }
 
     uint32_t write_varint(int32_t v) { return serialize_vint(v); }
+
+    uint32_t write_uvint(uint32_t v) {
+        return serialize_vint(v);
+    }
 
     uint32_t write_varlong(int64_t v) { return serialize_vint(v); }
 
@@ -150,6 +154,38 @@ public:
     template<typename Rep, typename Period>
     uint32_t write(const std::chrono::duration<Rep, Period>& d) {
         return write(int32_t(d.count()));
+    }
+
+    // clang-format off
+    template<typename T, typename ElementWriter>
+    CONCEPT(requires requires (ElementWriter writer,
+                               response_writer& rw,
+                               const T& elem) {
+        { writer(elem, rw) } -> std::same_as<void>;
+    })
+    // clang-format on
+    uint32_t write_compact_array(std::optional<std::vector<T>>& v, ElementWriter&& writer) {
+        auto start_size = uint32_t(_out->size_bytes());
+        if (!v.has_value()) {
+            auto l = write_uvint(0);
+            return l;
+        }
+
+        write_uvint(v.value().size() + 1);
+        for (auto& elem : v.value()) {
+            writer(elem, *this);
+        }
+        return _out->size_bytes() - start_size;
+    }
+
+    uint32_t write_compact_string(std::optional<ss::sstring>& s) {
+        if (!s.has_value()) {
+            return write_uvint(0);
+        }
+
+        auto size = write_uvint(s.value().size() + 1) + s.value().size(); 
+        _out->append(s.value().data(), s.value().size());
+        return size;
     }
 
     // clang-format off

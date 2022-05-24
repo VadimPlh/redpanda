@@ -43,6 +43,8 @@ v_cc_library(
   SRCS
     protocol/batch_reader.cc
     protocol/kafka_batch_adapter.cc
+    protocol/custom_parsers/txn_offset_commit_request_parser.cc
+    protocol/custom_parsers/txn_offset_commit_response_parser.cc
     ${handlers_srcs}
     server/requests.cc
     server/member.cc

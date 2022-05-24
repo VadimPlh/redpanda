@@ -48,7 +48,30 @@ public:
         return i;
     }
 
+    uint32_t read_uvarint() { return static_cast<uint32_t>(read_varlong_without_zigzag()); };
+    int64_t read_varlong_without_zigzag() {
+        auto [i, _] = _parser.read_varlong_without_zigzag();
+        return i;
+    }
+
+    void print_all() {
+        auto size = _parser.bytes_left();
+        auto b = _parser.read_bytes(size);
+        for (auto i : b) {
+            std::cout << i;
+        }
+        std::cout << std::endl;
+    }
+
     ss::sstring read_string() { return do_read_string(read_int16()); }
+
+    std::optional<ss::sstring> read_compact_string() {
+        uint32_t size = read_uvarint();
+        if (size == 0) {
+            return std::nullopt;
+        }
+        return {do_read_string(size - 1)};
+    }
 
     std::optional<ss::sstring> read_nullable_string() {
         auto n = read_int16();
@@ -102,6 +125,17 @@ public:
             return std::nullopt;
         }
         return do_read_array(len, std::forward<ElementParser>(parser));
+    }
+
+    template<
+      typename ElementParser,
+      typename T = std::invoke_result_t<ElementParser, request_reader&>>
+    std::optional<std::vector<T>> read_compact_array(ElementParser&& parser) {
+        auto len = read_uvarint();
+        if (len == 0) {
+            return std::nullopt;
+        }
+        return do_read_array(len - 1, std::forward<ElementParser>(parser));
     }
 
 private:
