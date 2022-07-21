@@ -122,6 +122,7 @@ tx_gateway_frontend::tx_gateway_frontend(
      */
     if (_transactions_enabled) {
         start_expire_timer();
+        start_recommit_timer();
     }
 }
 
@@ -140,8 +141,24 @@ void tx_gateway_frontend::start_expire_timer() {
     rearm_expire_timer();
 }
 
+void tx_gateway_frontend::start_recommit_timer() {
+      if (ss::this_shard_id() != 0) {
+        // tx_gateway_frontend is intented to be used only as a sharded
+        // service (run on all cores) so constraining it to a core will
+        // guarantee that there is only one active gc process.
+        //
+        // the gc part (expire_old_txs) does the shard managment and
+        // relays the execution to the right core so it's enough to
+        // have only one timer/loop
+        return;
+    }
+    _recommit_timer.set_callback([this] { recommit_txs(); });
+    rearm_recommit_timer();
+}
+
 ss::future<> tx_gateway_frontend::stop() {
     _expire_timer.cancel();
+    _recommit_timer.cancel();
     _as.request_abort();
     return _gate.close();
 }
@@ -1613,6 +1630,8 @@ tx_gateway_frontend::do_commit_tm_tx(
         ok = ok && (r.ec == tx_errc::none);
     }
     if (!ok) {
+        vlog(txlog.info, "Problem in commit for {}", tx.id);
+        stm->add_tx_to_recommit(tx.id);
         co_return tx_errc::unknown_server_error;
     }
     co_return tx;
@@ -1912,6 +1931,114 @@ ss::future<> tx_gateway_frontend::do_expire_old_tx(
         co_return;
     }
 
+    co_await stm->expire_tx(tx_id);
+}
+
+void tx_gateway_frontend::recommit_txs() {
+    ssx::spawn_with_gate(_gate, [this] {
+        auto shard = _shard_table.local().shard_for(model::tx_manager_ntp);
+
+        if (shard == std::nullopt) {
+            rearm_recommit_timer();
+            return ss::now();
+        }
+
+        return container()
+          .invoke_on(
+            *shard,
+            _ssg,
+            [](tx_gateway_frontend& self) { return self.do_recommit_txs(); })
+          .finally([this] { rearm_recommit_timer(); });
+    });
+}
+
+ss::future<> tx_gateway_frontend::do_recommit_txs() {
+    return ss::with_gate(_gate, [this] {
+        auto partition = _partition_manager.local().get(model::tx_manager_ntp);
+        if (!partition) {
+            vlog(
+              txlog.warn,
+              "can't get partition by {} ntp",
+              model::tx_manager_ntp);
+            return ss::now();
+        }
+
+        auto stm = partition->tm_stm();
+        return stm->read_lock().then(
+          [this, stm](ss::basic_rwlock<>::holder unit) {
+              return recommit_txs(stm).finally([u = std::move(unit)] {});
+          });
+    });
+}
+
+ss::future<> tx_gateway_frontend::recommit_txs(ss::shared_ptr<tm_stm> stm) {
+    auto tx_ids = stm->get_recommit_tx();
+    for (auto tx_id : tx_ids) {
+        vlog(txlog.info, "Try to recommit {}", tx_id);
+        co_await recommit_txs(stm, tx_id);
+    }
+}
+
+ss::future<> tx_gateway_frontend::recommit_txs(
+  ss::shared_ptr<tm_stm> stm, kafka::transactional_id tx_id) {
+    return with(stm, tx_id, "recommit_txs", [this, stm, tx_id]() {
+        return do_recommit_txs(
+          stm, tx_id, config::shard_local_cfg().create_topic_timeout_ms());
+    });
+}
+
+ss::future<> tx_gateway_frontend::do_recommit_txs(
+  ss::shared_ptr<tm_stm> stm,
+  kafka::transactional_id tx_id,
+  model::timeout_clock::duration timeout) {
+    auto term_opt = co_await stm->sync();
+    if (!term_opt.has_value()) {
+        co_return;
+    }
+    auto term = term_opt.value();
+    auto tx_opt = stm->get_tx(tx_id);
+    if (!tx_opt) {
+        // either timeout or already expired
+        co_return;
+    }
+
+    auto tx = tx_opt.value();
+
+    checked<tm_transaction, tx_errc> r(tx);
+
+    if (tx.status == tm_transaction::tx_status::ready) {
+        // already in a good state, we don't need to do anything
+    } else if (tx.status == tm_transaction::tx_status::ongoing) {
+        r = co_await do_abort_tm_tx(term, stm, tx, timeout);
+    } else if (tx.status == tm_transaction::tx_status::preparing) {
+        r = co_await do_commit_tm_tx(
+          term,
+          stm,
+          tx,
+          timeout,
+          ss::make_lw_shared<available_promise<tx_errc>>());
+    } else {
+        tx_errc ec;
+        if (tx.status == tm_transaction::tx_status::prepared) {
+            ec = co_await recommit_tm_tx(tx, timeout);
+        } else if (tx.status == tm_transaction::tx_status::aborting) {
+            ec = co_await reabort_tm_tx(tx, timeout);
+        } else if (tx.status == tm_transaction::tx_status::killed) {
+            ec = co_await reabort_tm_tx(tx, timeout);
+        } else {
+            vassert(false, "unexpected tx status {}", tx.status);
+        }
+
+        if (ec != tx_errc::none) {
+            r = ec;
+        }
+    }
+
+    if (!r.has_value()) {
+        co_return;
+    }
+
+    stm->delete_tx_from_recommit(tx_id);
     co_await stm->expire_tx(tx_id);
 }
 

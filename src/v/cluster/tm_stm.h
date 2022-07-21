@@ -29,6 +29,7 @@
 
 #include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <compare>
 
@@ -222,6 +223,18 @@ public:
       kafka::transactional_id tid,
       tm_transaction::tx_partition ntp);
 
+    void add_tx_to_recommit(kafka::transactional_id tid) {
+        _txs_for_recommit.insert(tid);
+    }
+
+    void delete_tx_from_recommit(kafka::transactional_id tid) {
+        _txs_for_recommit.erase(tid);
+    }
+
+     absl::node_hash_set<kafka::transactional_id> get_recommit_tx() {
+        return _txs_for_recommit;
+    }
+
 protected:
     ss::future<> handle_eviction() override;
 
@@ -250,6 +263,8 @@ private:
           model::make_memory_record_batch_reader(std::move(batch)),
           raft::replicate_options{raft::consistency_level::quorum_ack});
     }
+
+    absl::node_hash_set<kafka::transactional_id> _txs_for_recommit;
 };
 
 struct tm_transaction_v0 {

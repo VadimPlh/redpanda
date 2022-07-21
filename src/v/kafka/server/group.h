@@ -719,29 +719,29 @@ private:
     get_abort_origin(const model::producer_identity&, model::tx_seq) const;
 
     bool has_pending_transaction(const model::topic_partition& tp) {
-        if (std::any_of(
-              _pending_offset_commits.begin(),
-              _pending_offset_commits.end(),
-              [&tp](const auto& tp_info) { return tp_info.first == tp; })) {
+        auto it1 = _pending_offset_commits.find(tp);
+        if (it1 != _pending_offset_commits.end()) {
+            vlog(
+              _ctx_txlog.info,
+              "Can not fetch offset because pending {} {} {}",
+              it1->second.offset,
+              it1->second.log_offset,
+              it1->second.committed_leader_epoch);
             return true;
         }
 
-        if (std::any_of(
-              _volatile_txs.begin(),
-              _volatile_txs.end(),
-              [&tp](const auto& tp_info) {
-                  return tp_info.second.offsets.contains(tp);
-              })) {
-            return true;
+        for (auto& it2 : _volatile_txs) {
+            if (it2.second.offsets.contains(tp)) {
+                vlog(_ctx_txlog.info, "Volatile tx {}", it2.first);
+                return true;
+            }
         }
 
-        if (std::any_of(
-              _prepared_txs.begin(),
-              _prepared_txs.end(),
-              [&tp](const auto& tp_info) {
-                  return tp_info.second.offsets.contains(tp);
-              })) {
-            return true;
+        for (auto& it3 : _prepared_txs) {
+            if (it3.second.offsets.contains(tp)) {
+                vlog(_ctx_txlog.info, "Prepared tx {}", it3.first);
+                return true;
+            }
         }
 
         return false;
