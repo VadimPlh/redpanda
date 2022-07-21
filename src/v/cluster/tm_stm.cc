@@ -488,7 +488,7 @@ ss::future<> tm_stm::apply(model::record_batch b) {
 
 bool tm_stm::is_expired(const tm_transaction& tx) {
     auto now_ts = clock_type::now();
-    return (_transactional_id_expiration < now_ts - tx.last_update_ts) || _txs_for_recommit.contains(tx.id);
+    return _transactional_id_expiration < now_ts - tx.last_update_ts;
 }
 
 absl::btree_set<kafka::transactional_id> tm_stm::get_expired_txs() {
