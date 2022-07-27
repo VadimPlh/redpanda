@@ -1712,6 +1712,7 @@ group::commit_tx(cluster::commit_group_tx_request r) {
     }
 
     _prepared_txs.erase(prepare_it);
+    _expiration_info.erase(r.pid);
 
     co_return make_commit_tx_reply(cluster::tx_errc::none);
 }
@@ -1809,6 +1810,8 @@ group::begin_tx(cluster::begin_group_tx_request r) {
         co_return make_begin_tx_reply(cluster::tx_errc::request_rejected);
     }
 
+    _expiration_info.insert_or_assign(r.pid, r.timeout);
+
     cluster::begin_group_tx_reply reply;
     reply.etag = _term;
     reply.ec = cluster::tx_errc::none;
@@ -1893,6 +1896,7 @@ group::prepare_tx(cluster::prepare_group_tx_request r) {
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!e) {
+        _expiration_info.erase(r.pid);
         co_return make_prepare_tx_reply(cluster::tx_errc::unknown_server_error);
     }
 
@@ -1907,6 +1911,7 @@ group::prepare_tx(cluster::prepare_group_tx_request r) {
         ptx.offsets[tp] = md;
     }
     _prepared_txs[r.pid] = ptx;
+    _expiration_info[r.pid].update_last_update_time();
     co_return make_prepare_tx_reply(cluster::tx_errc::none);
 }
 
@@ -1993,6 +1998,7 @@ group::abort_tx(cluster::abort_group_tx_request r) {
     }
 
     _prepared_txs.erase(r.pid);
+    _expiration_info.erase(r.pid);
 
     co_return make_abort_tx_reply(cluster::tx_errc::none);
 }
@@ -2023,6 +2029,8 @@ group::store_txn_offsets(txn_offset_commit_request r) {
             tx_it->second.offsets[tp] = md;
         }
     }
+
+    // Should we update expirtion info here?
 
     co_return txn_offset_commit_response(r, error_code::none);
 }

@@ -25,6 +25,7 @@
 #include "model/fundamental.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "model/timeout_clock.h"
 #include "seastarx.h"
 #include "utils/mutex.h"
 
@@ -802,8 +803,32 @@ private:
         absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
     };
 
+    struct expiration_info {
+        explicit expiration_info(model::timeout_clock::duration timeout)
+          : timeout(timeout)
+          , last_update(model::timeout_clock::now()) {}
+
+        model::timeout_clock::duration timeout;
+        model::timeout_clock::time_point last_update;
+        bool is_expiration_requested{};
+
+        model::timeout_clock::time_point deadline() const {
+            return last_update + timeout;
+        }
+
+        bool is_expired(model::timeout_clock::time_point now) const {
+            return is_expiration_requested || deadline() <= now;
+        }
+
+        void update_last_update_time() {
+            last_update = model::timeout_clock::now();
+        }
+    };
+
     absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;
     absl::node_hash_map<model::producer_identity, prepared_tx> _prepared_txs;
+    absl::node_hash_map<model::producer_identity, expiration_info>
+      _expiration_info;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;
