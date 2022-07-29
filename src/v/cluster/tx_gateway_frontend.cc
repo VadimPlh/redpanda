@@ -1101,7 +1101,7 @@ ss::future<add_offsets_tx_reply> tx_gateway_frontend::do_add_offsets_to_tx(
     auto has_added = stm->add_group(tx.id, request.group_id, group_info.etag);
     if (!has_added) {
         vlog(txlog.warn, "can't add group to tm_stm");
-        in_state co_return add_offsets_tx_reply{
+        co_return add_offsets_tx_reply{
           .error_code = tx_errc::invalid_txn_state};
     }
     co_return add_offsets_tx_reply{.error_code = tx_errc::none};

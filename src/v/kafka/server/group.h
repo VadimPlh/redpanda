@@ -185,6 +185,7 @@ public:
       group_state s,
       config::configuration& conf,
       ss::lw_shared_ptr<cluster::partition> partition,
+      ss::sharded<cluster::tx_gateway_frontend>&,
       group_metadata_serializer,
       enable_group_metrics);
 
@@ -194,6 +195,7 @@ public:
       group_metadata_value& md,
       config::configuration& conf,
       ss::lw_shared_ptr<cluster::partition> partition,
+      ss::sharded<cluster::tx_gateway_frontend>&,
       group_metadata_serializer,
       enable_group_metrics);
 
@@ -829,6 +831,8 @@ private:
     absl::node_hash_map<model::producer_identity, prepared_tx> _prepared_txs;
     absl::node_hash_map<model::producer_identity, expiration_info>
       _expiration_info;
+
+    ss::sharded<cluster::tx_gateway_frontend>& _tx_frontend;
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;
