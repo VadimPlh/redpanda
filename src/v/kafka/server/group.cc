@@ -1810,7 +1810,7 @@ group::begin_tx(cluster::begin_group_tx_request r) {
         co_return make_begin_tx_reply(cluster::tx_errc::request_rejected);
     }
 
-    _expiration_info.insert_or_assign(r.pid, r.timeout);
+    _expiration_info.insert_or_assign(r.pid, expiration_info(r.timeout));
 
     cluster::begin_group_tx_reply reply;
     reply.etag = _term;
@@ -1911,7 +1911,12 @@ group::prepare_tx(cluster::prepare_group_tx_request r) {
         ptx.offsets[tp] = md;
     }
     _prepared_txs[r.pid] = ptx;
-    _expiration_info[r.pid].update_last_update_time();
+
+    auto exp_it = _expiration_info.find(r.pid);
+    vassert(
+      exp_it != _expiration_info.end(), "Shoul be inside _expiration_info");
+    exp_it->second.update_last_update_time();
+
     co_return make_prepare_tx_reply(cluster::tx_errc::none);
 }
 
@@ -1959,6 +1964,12 @@ group::abort_tx(cluster::abort_group_tx_request r) {
         // impossible situation: before transactional coordinator may issue
         // abort of the current transaction it should begin it and abort all
         // previous transactions with the same pid
+
+        auto it = _expiration_info.find(r.pid);
+        if (it != _expiration_info.end()) {
+            it->second.is_expiration_requested = true;
+        }
+
         vlog(
           _ctx_txlog.error,
           "Rejecting abort (pid:{}, tx_seq: {}) because it isn't consistent "
