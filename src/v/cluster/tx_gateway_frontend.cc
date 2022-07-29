@@ -142,7 +142,7 @@ void tx_gateway_frontend::start_expire_timer() {
 }
 
 void tx_gateway_frontend::start_recommit_timer() {
-      if (ss::this_shard_id() != 0) {
+    if (ss::this_shard_id() != 0) {
         // tx_gateway_frontend is intented to be used only as a sharded
         // service (run on all cores) so constraining it to a core will
         // guarantee that there is only one active gc process.
@@ -1092,7 +1092,7 @@ ss::future<add_offsets_tx_reply> tx_gateway_frontend::do_add_offsets_to_tx(
     }
 
     auto group_info = co_await _rm_group_proxy->begin_group_tx(
-      request.group_id, pid, tx.tx_seq, timeout);
+      request.group_id, pid, tx.tx_seq, tx.timeout_ms);
     if (group_info.ec != tx_errc::none) {
         vlog(txlog.warn, "error on begining group tx: {}", group_info.ec);
         co_return add_offsets_tx_reply{.error_code = group_info.ec};
@@ -1101,7 +1101,7 @@ ss::future<add_offsets_tx_reply> tx_gateway_frontend::do_add_offsets_to_tx(
     auto has_added = stm->add_group(tx.id, request.group_id, group_info.etag);
     if (!has_added) {
         vlog(txlog.warn, "can't add group to tm_stm");
-        co_return add_offsets_tx_reply{
+        in_state co_return add_offsets_tx_reply{
           .error_code = tx_errc::invalid_txn_state};
     }
     co_return add_offsets_tx_reply{.error_code = tx_errc::none};
