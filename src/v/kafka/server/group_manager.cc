@@ -108,7 +108,7 @@ ss::future<> group_manager::stop() {
      * during application shutdown
      */
     if (_gate.is_closed()) {
-        return ss::now();
+        co_return;
     }
     _pm.local().unregister_manage_notification(_manage_notify_handle);
     _pm.local().unregister_unmanage_notification(_unmanage_notify_handle);
@@ -120,15 +120,15 @@ ss::future<> group_manager::stop() {
         e.second->as.request_abort();
     }
 
-    return _gate.close().then([this] {
-        /**
-         * cancel all pending group opeartions
-         */
-        for (auto& [_, group] : _groups) {
-            group->shutdown();
-        }
-        _partitions.clear();
-    });
+    co_await _gate.close();
+    /**
+     * cancel all pending group opeartions
+     */
+    for (auto& [_, group] : _groups) {
+        co_await group->shutdown();
+    }
+    _partitions.clear();
+    co_return;
 }
 
 void group_manager::detach_partition(const model::ntp& ntp) {
@@ -144,7 +144,7 @@ void group_manager::detach_partition(const model::ntp& ntp) {
 
         for (auto g_it = _groups.begin(); g_it != _groups.end();) {
             if (g_it->second->partition()->ntp() == p->partition->ntp()) {
-                g_it->second->shutdown();
+                co_await g_it->second->shutdown();
                 _groups.erase(g_it++);
                 continue;
             }
@@ -292,7 +292,7 @@ group_manager::gc_partition_state(ss::lw_shared_ptr<attached_partition> p) {
 
     for (auto it = _groups.begin(); it != _groups.end();) {
         if (it->second->partition()->ntp() == p->partition->ntp()) {
-            it->second->shutdown();
+            co_await it->second->shutdown();
             _groups.erase(it++);
             continue;
         }

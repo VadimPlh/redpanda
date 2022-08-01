@@ -118,6 +118,7 @@ class group final : public ss::enable_lw_shared_from_this<group> {
 public:
     using clock_type = ss::lowres_clock;
     using duration_type = clock_type::duration;
+    using time_point_type = clock_type::time_point;
 
     static constexpr int8_t fence_control_record_version{0};
     static constexpr int8_t prepared_tx_record_version{0};
@@ -592,7 +593,7 @@ public:
       const ss::sstring&) const;
 
     // shutdown group. cancel all pending operations
-    void shutdown();
+    ss::future<> shutdown();
 
 private:
     using member_map = absl::node_hash_map<kafka::member_id, member_ptr>;
@@ -833,6 +834,17 @@ private:
       _expiration_info;
 
     ss::sharded<cluster::tx_gateway_frontend>& _tx_frontend;
+
+    ss::gate _gate;
+    ss::timer<clock_type> _auto_abort_timer;
+    std::chrono::milliseconds _transactional_id_expiration;
+
+    void abort_old_txes();
+    ss::future<> do_abort_old_txes();
+    ss::future<> try_abort_old_tx(model::producer_identity);
+    ss::future<> do_try_abort_old_tx(model::producer_identity);
+    void try_arm(time_point_type);
+
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;

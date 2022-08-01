@@ -69,7 +69,9 @@ group::group(
   , _ctx_txlog(cluster::txlog, *this)
   , _md_serializer(std::move(serializer))
   , _enable_group_metrics(group_metrics)
-  , _tx_frontend(tx_frontend) {
+  , _tx_frontend(tx_frontend)
+  , _transactional_id_expiration(
+      config::shard_local_cfg().transactional_id_expiration_ms.value()) {
     if (_enable_group_metrics) {
         _probe.setup_public_metrics(_id);
     }
@@ -95,7 +97,9 @@ group::group(
   , _ctx_txlog(cluster::txlog, *this)
   , _md_serializer(std::move(serializer))
   , _enable_group_metrics(group_metrics)
-  , _tx_frontend(tx_frontend) {
+  , _tx_frontend(tx_frontend)
+  , _transactional_id_expiration(
+      config::shard_local_cfg().transactional_id_expiration_ms.value()) {
     _state = md.members.empty() ? group_state::empty : group_state::stable;
     _generation = md.generation;
     _protocol_type = md.protocol_type;
@@ -1197,7 +1201,9 @@ void group::remove_pending_member(kafka::member_id member_id) {
     }
 }
 
-void group::shutdown() {
+ss::future<> group::shutdown() {
+    _auto_abort_timer.cancel();
+    co_await _gate.close();
     // cancel join timer
     _join_timer.cancel();
     // cancel pending members timers
@@ -1215,6 +1221,8 @@ void group::shutdown() {
               member, make_join_error(member_id, error_code::not_coordinator));
         }
     }
+
+    co_return;
 }
 
 void group::remove_member(member_ptr member) {
