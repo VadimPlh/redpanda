@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+#include "cluster/fwd.h"
 #include "config/configuration.h"
 #include "kafka/server/group.h"
 #include "kafka/server/group_metadata.h"
@@ -45,11 +46,13 @@ static bool is_uuid(const ss::sstring& uuid) {
  */
 static group get() {
     static config::configuration conf;
+    ss::sharded<cluster::tx_gateway_frontend> fr;
     return group(
       kafka::group_id("g"),
       group_state::empty,
       conf,
       nullptr,
+      fr,
       make_backward_compatible_serializer(),
       enable_group_metrics::no);
 }

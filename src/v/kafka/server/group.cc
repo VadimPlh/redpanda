@@ -12,6 +12,7 @@
 #include "bytes/bytes.h"
 #include "cluster/partition.h"
 #include "cluster/simple_batch_builder.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "cluster/tx_utils.h"
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
@@ -25,6 +26,7 @@
 #include "kafka/types.h"
 #include "likely.h"
 #include "model/fundamental.h"
+#include "model/record.h"
 #include "raft/errc.h"
 #include "ssx/future-util.h"
 #include "storage/record_batch_builder.h"
@@ -39,6 +41,8 @@
 #include <boost/uuid/uuid_io.hpp>
 #include <fmt/ostream.h>
 #include <fmt/ranges.h>
+
+#include <optional>
 
 namespace kafka {
 
@@ -75,6 +79,8 @@ group::group(
     if (_enable_group_metrics) {
         _probe.setup_public_metrics(_id);
     }
+    _auto_abort_timer.set_callback([this] { abort_old_txes(); });
+    try_arm(clock_type::now() + _transactional_id_expiration);
 }
 
 group::group(
@@ -122,6 +128,9 @@ group::group(
     if (_enable_group_metrics) {
         _probe.setup_public_metrics(_id);
     }
+
+    _auto_abort_timer.set_callback([this] { abort_old_txes(); });
+    try_arm(clock_type::now() + _transactional_id_expiration);
 }
 
 bool group::valid_previous_state(group_state s) const {
@@ -2758,6 +2767,192 @@ void group::add_pending_member(
       member_id);
 
     res.first->second.arm(timeout);
+}
+
+void group::abort_old_txes() {
+    vlog(_ctxlog.error, "Start aborting");
+    ssx::spawn_with_gate(_gate, [this] {
+        return do_abort_old_txes().finally([this] {
+            try_arm(clock_type::now() + _transactional_id_expiration);
+        });
+    });
+}
+
+ss::future<> group::do_abort_old_txes() {
+    std::vector<model::producer_identity> pids;
+    for (auto& [id, _] : _prepared_txs) {
+        pids.push_back(id);
+    }
+    for (auto& [id, _] : _volatile_txs) {
+        pids.push_back(id);
+    }
+
+    absl::btree_set<model::producer_identity> expired;
+    for (auto pid : pids) {
+        auto expiration_it = _expiration_info.find(pid);
+        if (expiration_it != _expiration_info.end()) {
+            if (!expiration_it->second.is_expired(clock_type::now())) {
+                continue;
+            }
+        }
+        vlog(_ctxlog.error, "Wanna abort {}", pid);
+        expired.insert(pid);
+    }
+
+    for (auto pid : expired) {
+        co_await try_abort_old_tx(pid);
+    }
+}
+
+ss::future<> group::try_abort_old_tx(model::producer_identity pid) {
+    return get_tx_lock(pid.get_id())
+      ->with([this, pid]() { return do_try_abort_old_tx(pid); })
+      .finally([] {});
+}
+
+ss::future<> group::do_try_abort_old_tx(model::producer_identity pid) {
+    auto expiration_it = _expiration_info.find(pid);
+    if (expiration_it != _expiration_info.end()) {
+        if (!expiration_it->second.is_expired(clock_type::now())) {
+            vlog(_ctxlog.error, "Skip {}", pid);
+            co_return;
+        }
+    }
+
+    std::optional<model::tx_seq> tx_seq;
+
+    auto p_it = _prepared_txs.find(pid);
+    if (p_it != _prepared_txs.end()) {
+        tx_seq = p_it->second.tx_seq;
+    }
+
+    if (tx_seq.has_value()) {
+        vlog(_ctxlog.error, "Finish prepared {}", pid);
+        auto r = co_await _tx_frontend.local().try_abort(
+          model::partition_id(0), pid, tx_seq.value(), 1000ms);
+        if (r.ec == cluster::tx_errc::none) {
+            if (r.commited) {
+                group_log_commit_tx commit_tx;
+                commit_tx.group_id = _id;
+                auto batch = make_tx_batch(
+                  model::record_batch_type::group_commit_tx,
+                  commit_tx_record_version,
+                  pid,
+                  std::move(commit_tx));
+
+                auto reader = model::make_memory_record_batch_reader(
+                  std::move(batch));
+
+                auto e = co_await _partition->raft()->replicate(
+                  _term,
+                  std::move(reader),
+                  raft::replicate_options(raft::consistency_level::quorum_ack));
+
+                if (!e) {
+                    vlog(_ctx_txlog.error, "Can not commit:{}", pid);
+                    co_return;
+                }
+
+                auto prepare_it = _prepared_txs.find(pid);
+                if (prepare_it == _prepared_txs.end()) {
+                    vlog(
+                      _ctx_txlog.error,
+                      "can't find already observed prepared tx pid:{}",
+                      pid);
+                    co_return;
+                }
+
+                for (const auto& [tp, md] : prepare_it->second.offsets) {
+                    try_upsert_offset(tp, md);
+                }
+
+                _prepared_txs.erase(prepare_it);
+                _expiration_info.erase(pid);
+            } else if (r.aborted) {
+                _volatile_txs.erase(pid);
+
+                // TODO: https://app.clubhouse.io/vectorized/story/2197
+                // (check for tx_seq to prevent old abort requests aborting
+                // new transactions in the same session)
+
+                auto tx = group_log_aborted_tx{
+                  .group_id = _id, .tx_seq = tx_seq.value()};
+
+                // TODO: https://app.clubhouse.io/vectorized/story/2200
+                // include producer_id+type into key to make it unique-ish
+                // to prevent being GCed by the compaction
+                auto batch = make_tx_batch(
+                  model::record_batch_type::group_abort_tx,
+                  aborted_tx_record_version,
+                  pid,
+                  std::move(tx));
+                auto reader = model::make_memory_record_batch_reader(
+                  std::move(batch));
+
+                auto e = co_await _partition->raft()->replicate(
+                  _term,
+                  std::move(reader),
+                  raft::replicate_options(raft::consistency_level::quorum_ack));
+
+                if (!e) {
+                    vlog(_ctx_txlog.error, "Can not commit pid:{}", pid);
+                    co_return;
+                }
+
+                _prepared_txs.erase(pid);
+                _expiration_info.erase(pid);
+            }
+        }
+    } else {
+        vlog(_ctxlog.error, "Finish valit {}", pid);
+        auto v_it = _volatile_txs.find(pid);
+        if (v_it != _volatile_txs.end()) {
+            tx_seq = v_it->second.tx_seq;
+        } else {
+            co_return;
+        }
+        _volatile_txs.erase(pid);
+
+        // TODO: https://app.clubhouse.io/vectorized/story/2197
+        // (check for tx_seq to prevent old abort requests aborting
+        // new transactions in the same session)
+
+        auto tx = group_log_aborted_tx{
+          .group_id = _id, .tx_seq = tx_seq.value()};
+
+        // TODO: https://app.clubhouse.io/vectorized/story/2200
+        // include producer_id+type into key to make it unique-ish
+        // to prevent being GCed by the compaction
+        auto batch = make_tx_batch(
+          model::record_batch_type::group_abort_tx,
+          aborted_tx_record_version,
+          pid,
+          std::move(tx));
+        auto reader = model::make_memory_record_batch_reader(std::move(batch));
+
+        auto e = co_await _partition->raft()->replicate(
+          _term,
+          std::move(reader),
+          raft::replicate_options(raft::consistency_level::quorum_ack));
+
+        if (!e) {
+            vlog(_ctx_txlog.error, "Can not commit vol tx pid:{}", pid);
+            co_return;
+        }
+
+        _prepared_txs.erase(pid);
+        _expiration_info.erase(pid);
+    }
+}
+
+void group::try_arm(time_point_type deadline) {
+    if (
+      _auto_abort_timer.armed() && _auto_abort_timer.get_timeout() > deadline) {
+        _auto_abort_timer.cancel();
+        _auto_abort_timer.arm(deadline);
+    } else if (!_auto_abort_timer.armed()) {
+        _auto_abort_timer.arm(deadline);
+    }
 }
 
 std::ostream& operator<<(std::ostream& o, const group::offset_metadata& md) {
