@@ -1129,6 +1129,8 @@ rm_stm::replicate_tx(model::batch_identity bid, model::record_batch_reader br) {
         _mem_state.estimated.erase(bid.pid);
     }
 
+    _mem_state.last_replicated_offset[bid.pid] = old_offset;
+
     co_return kafka_result{.last_offset = new_offset};
 }
 

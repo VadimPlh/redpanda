@@ -408,11 +408,15 @@ private:
         model::offset last_end_tx{-1};
         absl::flat_hash_map<model::producer_identity, int64_t> inflight;
 
+        absl::flat_hash_map<model::producer_identity, model::offset>
+          last_replicated_offset;
+
         void forget(model::producer_identity pid) {
             expected.erase(pid);
             estimated.erase(pid);
             preparing.erase(pid);
             expiration.erase(pid);
+            last_replicated_offset.erase(pid);
             auto tx_start_it = tx_start.find(pid);
             if (tx_start_it != tx_start.end()) {
                 tx_starts.erase(tx_start_it->second);
