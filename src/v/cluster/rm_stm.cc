@@ -477,24 +477,18 @@ ss::future<tx_errc> rm_stm::do_prepare_tx(
         co_return tx_errc::conflict;
     }
 
-    auto batch = make_prepare_batch(marker);
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
-    auto r = co_await _c->replicate(
-      etag,
-      std::move(reader),
-      raft::replicate_options(raft::consistency_level::quorum_ack));
-
-    if (!r) {
+    auto last_replicated_offset_it = _mem_state.last_replicated_offset.find(
+      pid);
+    if (last_replicated_offset_it == _mem_state.last_replicated_offset.end()) {
         vlog(
           clusterlog.error,
-          "Error \"{}\" on replicating pid:{} prepare batch",
-          r.error(),
+          "Can't find last replicated offset for pid({}). Can not prepare "
+          "transaction",
           pid);
         co_return tx_errc::unknown_server_error;
     }
 
-    if (!co_await wait_no_throw(
-          model::offset(r.value().last_offset()), timeout)) {
+    if (!co_await wait_no_throw(last_replicated_offset_it->second, timeout)) {
         co_return tx_errc::unknown_server_error;
     }
 
@@ -1129,6 +1123,8 @@ rm_stm::replicate_tx(model::batch_identity bid, model::record_batch_reader br) {
         _mem_state.tx_starts.insert(base_offset);
         _mem_state.estimated.erase(bid.pid);
     }
+
+    _mem_state.last_replicated_offset[bid.pid] = old_offset;
 
     co_return kafka_result{.last_offset = new_offset};
 }
