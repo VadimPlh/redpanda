@@ -468,7 +468,7 @@ struct replicate_stages {
     ss::future<result<replicate_result>> replicate_finished;
 };
 
-enum class consistency_level { quorum_ack, leader_ack, no_ack };
+enum class consistency_level { quorum_ack, leader_ack, no_ack, leader_ack_with_flush };
 
 struct replicate_options {
     explicit replicate_options(consistency_level l)

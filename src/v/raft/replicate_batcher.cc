@@ -210,9 +210,17 @@ ss::future<> replicate_batcher::flush(
               !n->expected_term.has_value()
               || n->expected_term.value() == term) {
                 item_memory_units.adopt(std::move(n->units));
-                if (n->consistency_lvl == consistency_level::quorum_ack) {
+                if (
+                  n->consistency_lvl == consistency_level::quorum_ack
+                  || n->consistency_lvl
+                       == consistency_level::leader_ack_with_flush) {
                     needs_flush
                       = append_entries_request::flush_after_append::yes;
+                    if (
+                      n->consistency_lvl
+                      == consistency_level::leader_ack_with_flush) {
+                        n->consistency_lvl = consistency_level::leader_ack;
+                    }
                 }
                 for (auto& b : n->data) {
                     b.set_term(term);
@@ -306,7 +314,9 @@ ss::future<> replicate_batcher::do_flush(
         propagate_result(
           leader_result, notifications, [](const item_ptr& item) {
               return item->consistency_lvl == consistency_level::leader_ack
-                     || item->consistency_lvl == consistency_level::no_ack;
+                     || item->consistency_lvl == consistency_level::no_ack
+                     || item->consistency_lvl
+                          == consistency_level::leader_ack_with_flush;
           });
         /**
          * Second phase, wait for majority to replicate if leader result has
