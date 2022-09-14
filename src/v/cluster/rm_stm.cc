@@ -61,25 +61,6 @@ make_fence_batch(int8_t version, model::producer_identity pid) {
     return std::move(builder).build();
 }
 
-static model::record_batch make_prepare_batch(rm_stm::prepare_marker record) {
-    storage::record_batch_builder builder(
-      model::record_batch_type::tx_prepare, model::offset(0));
-    builder.set_producer_identity(record.pid.id, record.pid.epoch);
-    builder.set_control_type();
-
-    iobuf key;
-    reflection::serialize(key, model::record_batch_type::tx_prepare);
-    reflection::serialize(key, record.pid.id);
-
-    iobuf value;
-    reflection::serialize(value, rm_stm::prepare_control_record_version);
-    reflection::serialize(value, record.tm_partition());
-    reflection::serialize(value, record.tx_seq());
-
-    builder.add_raw_kv(std::move(key), std::move(value));
-    return std::move(builder).build();
-}
-
 static model::record_batch make_tx_control_batch(
   model::producer_identity pid, model::control_record_type crt) {
     iobuf key;
@@ -477,26 +458,41 @@ ss::future<tx_errc> rm_stm::do_prepare_tx(
         co_return tx_errc::conflict;
     }
 
-    auto batch = make_prepare_batch(marker);
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
-    auto r = co_await _c->replicate(
-      etag,
-      std::move(reader),
-      raft::replicate_options(raft::consistency_level::quorum_ack));
+    barriere()
+    while (wait())
 
-    if (!r) {
+    auto appended_term = etag;
+    auto appended_offset = _mem_state.tx_end[pid];
+
+    auto stop_cond = [this, appended_offset, appended_term] {
+        const auto current_committed_offset = _c->committed_offset();
+        const auto committed = _c->term() == appended_term
+                               && current_committed_offset >= appended_offset;
+        const auto unknown = _c->term() > appended_term;
+        return committed || unknown;
+    };
+
+    vlog(
+      clusterlog.info,
+      "committed:{}; waiting:{}; dirty: {}",
+      _c->committed_offset(),
+      appended_offset,
+      _c->log().offsets().dirty_offset);
+
+    co_await _c->commit_index_updated().wait(stop_cond);
+
+    if (_c->term() != appended_term) {
         vlog(
-          clusterlog.error,
-          "Error \"{}\" on replicating pid:{} prepare batch",
-          r.error(),
-          pid);
+          clusterlog.debug,
+          "Term has changed while waiting for raft offset {}; canceling a "
+          "transaction",
+          appended_offset);
         co_return tx_errc::unknown_server_error;
     }
 
-    if (!co_await wait_no_throw(
-          model::offset(r.value().last_offset()), timeout)) {
-        co_return tx_errc::unknown_server_error;
-    }
+    _log_state.prepared.try_emplace(pid, marker);
+    _mem_state.expected.erase(pid);
+    _mem_state.preparing.erase(pid);
 
     co_return tx_errc::none;
 }
@@ -1102,7 +1098,7 @@ rm_stm::replicate_tx(model::batch_identity bid, model::record_batch_reader br) {
     auto r = co_await _c->replicate(
       synced_term,
       std::move(br),
-      raft::replicate_options(raft::consistency_level::leader_ack));
+      raft::replicate_options(raft::consistency_level::leader_ack_with_flush));
     if (!r) {
         if (_mem_state.estimated.contains(bid.pid)) {
             // an error during replication, preventin tx from progress
@@ -1120,6 +1116,13 @@ rm_stm::replicate_tx(model::batch_identity bid, model::record_batch_reader br) {
 
     auto old_offset = r.value().last_offset;
     auto new_offset = from_log_offset(old_offset);
+
+    if (!_mem_state.tx_end.contains(bid.pid)) {
+        _mem_state.tx_end.emplace(bid.pid, old_offset);
+    }
+
+    _mem_state.tx_end[bid.pid] = std::max(
+      _mem_state.tx_end[bid.pid], old_offset);
 
     set_seq(bid, new_offset);
 
@@ -1854,6 +1857,7 @@ void rm_stm::apply_data(model::batch_identity bid, model::offset last_offset) {
     }
 
     if (bid.is_transactional) {
+        /*
         if (_log_state.prepared.contains(bid.pid)) {
             vlog(
               clusterlog.error,
@@ -1866,7 +1870,7 @@ void rm_stm::apply_data(model::batch_identity bid, model::offset last_offset) {
                   bid.pid);
             }
             return;
-        }
+        }*/
 
         auto ongoing_it = _log_state.ongoing_map.find(bid.pid);
         if (ongoing_it != _log_state.ongoing_map.end()) {

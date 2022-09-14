@@ -583,7 +583,7 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
           meta(),
           model::make_memory_record_batch_reader(
             ss::circular_buffer<model::record_batch>{}),
-          append_entries_request::flush_after_append::no);
+          append_entries_request::flush_after_append::no); // Add flush arg
         auto seq = next_follower_sequence(target);
         sequences.emplace(target, seq);
 
@@ -732,6 +732,8 @@ replicate_stages consensus::do_replicate(
         break;
     case consistency_level::quorum_ack:
         _probe.replicate_requests_ack_all();
+        break;
+    case consistency_level::leader_ack_with_flush:
         break;
     }
 
@@ -1726,6 +1728,9 @@ consensus::do_append_entries(append_entries_request&& r) {
     // special case heartbeat case
     // we need to handle it early (before executing truncation)
     // as timeouts are asynchronous to append calls and can have stall data
+    
+
+    // Check do we need to flush here...
     if (r.batches().is_end_of_stream()) {
         if (r.meta.prev_log_index < last_log_offset) {
             // do not tuncate on heartbeat just response with false
