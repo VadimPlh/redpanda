@@ -863,3 +863,7 @@ class Admin:
 
     def is_node_isolated(self, node):
         return self._request("GET", "debug/is_node_isolated", node=node).json()
+
+    def get_raft_state(self, namespace, topic, partition):
+        path = f"debug/raft/{namespace}/{topic}/{partition}"
+        return self._request("GET", path).json()
