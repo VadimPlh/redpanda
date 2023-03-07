@@ -147,6 +147,40 @@
                     "parameters": []
                 }
             ]
+        },
+        {
+            "path": "/v1/debug/raft/{namespace}/{topic}/{partition}",
+            "operations": [
+                {
+                    "method": "GET",
+                    "summary": "Get raft states for leader and followers",
+                    "type": "raft_state",
+                    "nickname": "get_raft_state",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "namespace",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "topic",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "partition",
+                            "in": "path",
+                            "required": true,
+                            "type": "integer"
+                        }
+                    ]
+                }
+            ]
         }
     ],
     "models": {
@@ -296,6 +330,79 @@
                         "type": "self_test_result"
                     },
                     "description": "Recordings of test runs from a single node"
+                }
+            }
+        },
+        "raft_state": {
+            "id": "raft_state",
+            "description": "Raft state",
+            "properties": {
+                "leader_info": {
+                    "type": "raft_leader_state",
+                    "description": "Leader info"
+                },
+                "followers": {
+                    "type": "array",
+                    "items": {
+                        "type": "raft_follower_state"
+                    },
+                    "description": "Raft followers info"
+                }
+            }
+        },
+        "raft_leader_state": {
+            "id": "raft_leader_state",
+            "description": "Raft leader state",
+            "properties": {
+                "id": {
+                    "type": "int",
+                    "description": "Node id"
+                },
+                "committed_log_index": {
+                    "type": "long",
+                    "description": "Commited log index"
+                },
+                "dirty_log_index": {
+                    "type": "long",
+                    "description": "Dirty log index"
+                }
+            }
+        },
+        "raft_follower_state": {
+            "id": "raft_follower_state",
+            "description": "Raft follower state",
+            "properties": {
+                "id": {
+                    "type": "int",
+                    "description": "Node id"
+                },
+                "is_learner": {
+                    "type": "boolean",
+                    "description": "Is node role learner"
+                },
+                "committed_log_index": {
+                    "type": "long",
+                    "description": "Commited log index"
+                },
+                "dirty_log_index": {
+                    "type": "long",
+                    "description": "Dirty log index"
+                },
+                "match_index": {
+                    "type": "long",
+                    "description": "Match index"
+                },
+                "time_from_last_heartbeat_ms": {
+                    "type": "long",
+                    "description": "last heartbeat time"
+                },
+                "is_live": {
+                    "type": "boolean",
+                    "description": "Is node live"
+                },
+                "under_replicated": {
+                    "type": "boolean",
+                    "description": "Is node under replicated"
                 }
             }
         }
