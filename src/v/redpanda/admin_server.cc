@@ -100,6 +100,7 @@
 #include <boost/lexical_cast/bad_lexical_cast.hpp>
 #include <fmt/core.h>
 
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -3316,6 +3317,63 @@ void admin_server::register_self_test_routes() {
       });
 }
 
+ss::future<ss::json::json_return_type>
+admin_server::get_raft_state_handler(std::unique_ptr<ss::httpd::request> req) {
+    const model::ntp ntp = parse_ntp_from_request(req->param);
+
+    if (need_redirect_to_leader(ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, ntp);
+    }
+
+    seastar::httpd::debug_json::raft_state ans;
+
+    const bool is_controller = ntp == model::controller_ntp;
+    cluster::consensus_ptr raft;
+
+    if (!is_controller) {
+        auto partition = _partition_manager.local().get(ntp);
+        if (!partition) {
+            throw ss::httpd::not_found_exception(
+              fmt::format("Could not find ntp: {}", ntp));
+        }
+
+        raft = partition->raft();
+    } else {
+        raft = _controller->get_raft0();
+    }
+
+    if (!raft->is_leader()) {
+        throw ss::httpd::server_error_exception(
+          fmt_with_ctx(fmt::format, "Can not find leader for ntp {}", ntp));
+    }
+
+    seastar::httpd::debug_json::raft_leader_state leader_metrics;
+    leader_metrics.id = raft->get_leader_id().value();
+    leader_metrics.dirty_log_index = raft->dirty_offset();
+    leader_metrics.committed_log_index = raft->committed_offset();
+
+    ans.leader_info = leader_metrics;
+
+    auto followers_info = raft->get_follower_metrics();
+    for (const auto& info : followers_info) {
+        seastar::httpd::debug_json::raft_follower_state metrics;
+        metrics.id = info.id;
+        metrics.is_learner = info.is_learner;
+        metrics.is_live = info.is_live;
+        metrics.committed_log_index = info.committed_log_index;
+        metrics.dirty_log_index = info.dirty_log_index;
+        metrics.match_index = info.match_index;
+        metrics.under_replicated = info.under_replicated;
+        metrics.time_from_last_heartbeat_ms
+          = std::chrono::duration_cast<std::chrono::milliseconds>(
+              raft::clock_type::now() - info.last_heartbeat)
+              .count();
+        ans.followers.push(metrics);
+    }
+
+    co_return ans;
+}
+
 void admin_server::register_debug_routes() {
     register_route<user>(
       ss::httpd::debug_json::reset_leaders_info,
@@ -3397,6 +3455,13 @@ void admin_server::register_debug_routes() {
                 return ss::make_ready_future<ss::json::json_return_type>(
                   ss::json::json_return_type(ans));
             });
+      });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_raft_state,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          return get_raft_state_handler(std::move(req));
       });
 }
 ss::future<ss::json::json_return_type>
