@@ -3463,7 +3463,22 @@ void admin_server::register_debug_routes() {
         -> ss::future<ss::json::json_return_type> {
           return get_raft_state_handler(std::move(req));
       });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_partition_state,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          const model::ntp ntp = parse_ntp_from_request(req->param);
+          auto partition = _partition_manager.local().get(ntp);
+          if (partition.get() != nullptr) {
+              throw ss::httpd::not_found_exception(
+                fmt::format("Could not find ntp: {}", ntp));
+          }
+
+          
+      });
 }
+
 ss::future<ss::json::json_return_type>
 admin_server::get_partition_balancer_status_handler(
   std::unique_ptr<ss::httpd::request> req) {
