@@ -109,3 +109,8 @@ class AdminApiRaftStateTest(RedpandaTest):
             timeout_sec=60,
             backoff_sec=1,
             err_msg=f"Followers can not sync with leader for controller")
+
+    cluster(num_nodes=3)
+    def simple_partition_info_api:
+        self.topic_name = self.topics[0].name
+        
