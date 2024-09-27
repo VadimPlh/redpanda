@@ -25,6 +25,7 @@
 #include "model/fundamental.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "model/timeout_clock.h"
 #include "seastarx.h"
 #include "utils/mutex.h"
 
@@ -117,6 +118,7 @@ class group final : public ss::enable_lw_shared_from_this<group> {
 public:
     using clock_type = ss::lowres_clock;
     using duration_type = clock_type::duration;
+    using time_point_type = clock_type::time_point;
 
     static constexpr int8_t fence_control_record_version{0};
     static constexpr int8_t prepared_tx_record_version{0};
@@ -184,6 +186,7 @@ public:
       group_state s,
       config::configuration& conf,
       ss::lw_shared_ptr<cluster::partition> partition,
+      ss::sharded<cluster::tx_gateway_frontend>&,
       group_metadata_serializer,
       enable_group_metrics);
 
@@ -193,6 +196,7 @@ public:
       group_metadata_value& md,
       config::configuration& conf,
       ss::lw_shared_ptr<cluster::partition> partition,
+      ss::sharded<cluster::tx_gateway_frontend>&,
       group_metadata_serializer,
       enable_group_metrics);
 
@@ -589,7 +593,7 @@ public:
       const ss::sstring&) const;
 
     // shutdown group. cancel all pending operations
-    void shutdown();
+    ss::future<> shutdown();
 
 private:
     using member_map = absl::node_hash_map<kafka::member_id, member_ptr>;
@@ -719,29 +723,29 @@ private:
     get_abort_origin(const model::producer_identity&, model::tx_seq) const;
 
     bool has_pending_transaction(const model::topic_partition& tp) {
-        if (std::any_of(
-              _pending_offset_commits.begin(),
-              _pending_offset_commits.end(),
-              [&tp](const auto& tp_info) { return tp_info.first == tp; })) {
+        auto it1 = _pending_offset_commits.find(tp);
+        if (it1 != _pending_offset_commits.end()) {
+            vlog(
+              _ctx_txlog.info,
+              "Can not fetch offset because pending {} {} {}",
+              it1->second.offset,
+              it1->second.log_offset,
+              it1->second.committed_leader_epoch);
             return true;
         }
 
-        if (std::any_of(
-              _volatile_txs.begin(),
-              _volatile_txs.end(),
-              [&tp](const auto& tp_info) {
-                  return tp_info.second.offsets.contains(tp);
-              })) {
-            return true;
+        for (auto& it2 : _volatile_txs) {
+            if (it2.second.offsets.contains(tp)) {
+                vlog(_ctx_txlog.info, "Volatile tx {}", it2.first);
+                return true;
+            }
         }
 
-        if (std::any_of(
-              _prepared_txs.begin(),
-              _prepared_txs.end(),
-              [&tp](const auto& tp_info) {
-                  return tp_info.second.offsets.contains(tp);
-              })) {
-            return true;
+        for (auto& it3 : _prepared_txs) {
+            if (it3.second.offsets.contains(tp)) {
+                vlog(_ctx_txlog.info, "Prepared tx {}", it3.first);
+                return true;
+            }
         }
 
         return false;
@@ -802,8 +806,45 @@ private:
         absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
     };
 
+    struct expiration_info {
+        explicit expiration_info(model::timeout_clock::duration timeout)
+          : timeout(timeout)
+          , last_update(model::timeout_clock::now()) {}
+
+        model::timeout_clock::duration timeout;
+        model::timeout_clock::time_point last_update;
+        bool is_expiration_requested{};
+
+        model::timeout_clock::time_point deadline() const {
+            return last_update + timeout;
+        }
+
+        bool is_expired(model::timeout_clock::time_point now) const {
+            return is_expiration_requested || deadline() <= now;
+        }
+
+        void update_last_update_time() {
+            last_update = model::timeout_clock::now();
+        }
+    };
+
     absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;
     absl::node_hash_map<model::producer_identity, prepared_tx> _prepared_txs;
+    absl::node_hash_map<model::producer_identity, expiration_info>
+      _expiration_info;
+
+    ss::sharded<cluster::tx_gateway_frontend>& _tx_frontend;
+
+    ss::gate _gate;
+    ss::timer<clock_type> _auto_abort_timer;
+    std::chrono::milliseconds _transactional_id_expiration;
+
+    void abort_old_txes();
+    ss::future<> do_abort_old_txes();
+    ss::future<> try_abort_old_tx(model::producer_identity);
+    ss::future<> do_try_abort_old_tx(model::producer_identity);
+    void try_arm(time_point_type);
+
 };
 
 using group_ptr = ss::lw_shared_ptr<group>;

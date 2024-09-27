@@ -37,6 +37,7 @@ group_manager::group_manager(
   ss::sharded<raft::group_manager>& gm,
   ss::sharded<cluster::partition_manager>& pm,
   ss::sharded<cluster::topic_table>& topic_table,
+  ss::sharded<cluster::tx_gateway_frontend>& tx_frontend,
   group_metadata_serializer_factory serializer_factory,
   config::configuration& conf,
   enable_group_metrics enable_metrics)
@@ -44,6 +45,7 @@ group_manager::group_manager(
   , _gm(gm)
   , _pm(pm)
   , _topic_table(topic_table)
+  , _tx_frontend(tx_frontend)
   , _serializer_factory(std::move(serializer_factory))
   , _conf(conf)
   , _self(cluster::make_self_broker(config::node()))
@@ -106,7 +108,7 @@ ss::future<> group_manager::stop() {
      * during application shutdown
      */
     if (_gate.is_closed()) {
-        return ss::now();
+        co_return;
     }
     _pm.local().unregister_manage_notification(_manage_notify_handle);
     _pm.local().unregister_unmanage_notification(_unmanage_notify_handle);
@@ -118,15 +120,15 @@ ss::future<> group_manager::stop() {
         e.second->as.request_abort();
     }
 
-    return _gate.close().then([this] {
-        /**
-         * cancel all pending group opeartions
-         */
-        for (auto& [_, group] : _groups) {
-            group->shutdown();
-        }
-        _partitions.clear();
-    });
+    co_await _gate.close();
+    /**
+     * cancel all pending group opeartions
+     */
+    for (auto& [_, group] : _groups) {
+        co_await group->shutdown();
+    }
+    _partitions.clear();
+    co_return;
 }
 
 void group_manager::detach_partition(const model::ntp& ntp) {
@@ -142,7 +144,7 @@ void group_manager::detach_partition(const model::ntp& ntp) {
 
         for (auto g_it = _groups.begin(); g_it != _groups.end();) {
             if (g_it->second->partition()->ntp() == p->partition->ntp()) {
-                g_it->second->shutdown();
+                co_await g_it->second->shutdown();
                 _groups.erase(g_it++);
                 continue;
             }
@@ -290,7 +292,7 @@ group_manager::gc_partition_state(ss::lw_shared_ptr<attached_partition> p) {
 
     for (auto it = _groups.begin(); it != _groups.end();) {
         if (it->second->partition()->ntp() == p->partition->ntp()) {
-            it->second->shutdown();
+            co_await it->second->shutdown();
             _groups.erase(it++);
             continue;
         }
@@ -419,6 +421,7 @@ ss::future<> group_manager::recover_partition(
                   group_stm.get_metadata(),
                   _conf,
                   p->partition,
+                  _tx_frontend,
                   _serializer_factory(),
                   _enable_group_metrics);
                 group->reset_tx_state(term);
@@ -453,6 +456,7 @@ ss::future<> group_manager::recover_partition(
               group_state::empty,
               _conf,
               p->partition,
+              _tx_frontend,
               _serializer_factory(),
               _enable_group_metrics);
             group->reset_tx_state(term);
@@ -551,6 +555,7 @@ group::join_group_stages group_manager::join_group(join_group_request&& r) {
           group_state::empty,
           _conf,
           p,
+          _tx_frontend,
           _serializer_factory(),
           _enable_group_metrics);
         group->reset_tx_state(it->second->term);
@@ -697,6 +702,7 @@ group_manager::txn_offset_commit(txn_offset_commit_request&& r) {
                 group_state::empty,
                 _conf,
                 p->partition,
+                _tx_frontend,
                 _serializer_factory(),
                 _enable_group_metrics);
               group->reset_tx_state(p->term);
@@ -781,6 +787,7 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
                 group_state::empty,
                 _conf,
                 p->partition,
+                _tx_frontend,
                 _serializer_factory(),
                 _enable_group_metrics);
               group->reset_tx_state(p->term);
@@ -887,6 +894,7 @@ group_manager::offset_commit(offset_commit_request&& r) {
               group_state::empty,
               _conf,
               p->partition,
+              _tx_frontend,
               _serializer_factory(),
               _enable_group_metrics);
             group->reset_tx_state(p->term);

@@ -582,6 +582,7 @@ ss::future<> tm_stm::handle_eviction() {
           _log_txes.clear();
           _mem_txes.clear();
           _pid_tx_id.clear();
+          _txs_for_recommit.clear();
           set_next(_c->start_offset());
           return ss::now();
       });
